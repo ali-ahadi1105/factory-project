@@ -1,7 +1,13 @@
 import { Module } from '@nestjs/common';
 import { DatabaseService, FactoryStoreService } from './store';
 import { LineageService, OrchestratorService } from './engine';
-import { AgyAdapter, ClaudeAdapter, MockAgentAdapter, GitHubAdapter } from './adapters';
+import {
+  AgyAdapter,
+  ClaudeAdapter,
+  MockAgentAdapter,
+  GitHubAdapter,
+  TelegramAdapter,
+} from './adapters';
 
 @Module({
   providers: [
@@ -12,6 +18,7 @@ import { AgyAdapter, ClaudeAdapter, MockAgentAdapter, GitHubAdapter } from './ad
     ClaudeAdapter,
     MockAgentAdapter,
     GitHubAdapter,
+    TelegramAdapter,
     OrchestratorService,
   ],
   exports: [
@@ -20,6 +27,7 @@ import { AgyAdapter, ClaudeAdapter, MockAgentAdapter, GitHubAdapter } from './ad
     LineageService,
     OrchestratorService,
     GitHubAdapter,
+    TelegramAdapter,
   ],
 })
 export class AppModule {}
