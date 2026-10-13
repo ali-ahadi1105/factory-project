@@ -134,7 +134,10 @@ program
 
       console.log('\n✅ Pipeline Finished!');
       console.log(`Work ID: ${result.workId}`);
-      if (result.prUrl) console.log(`🔗 Pull Request: ${result.prUrl}`);
+      if (result.issueUrl) console.log(`📌 GitHub Issue: ${result.issueUrl} (#${result.issueNumber})`);
+      if (result.branchName) console.log(`🌿 Git Branch: ${result.branchName}`);
+      if (result.prUrl) console.log(`🔗 Pull Request: ${result.prUrl} (#${result.prNumber})`);
+      console.log(`🧪 Automated Tests: ${result.testPassed ? '✅ PASSED' : '⚠️ FAILED'}`);
       console.log('\n📊 Lineage Tree:');
       console.log(result.lineageTree);
     } catch (err: any) {
