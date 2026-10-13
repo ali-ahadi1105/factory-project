@@ -37,11 +37,59 @@ export interface FactorySummaryMetrics {
 @Injectable()
 export class ReporterService {
   private readonly logger = new Logger(ReporterService.name);
+  private readonly sseClients = new Set<http.ServerResponse>();
 
   constructor(
     private readonly store: FactoryStoreService,
     private readonly lineageService: LineageService,
   ) {}
+
+  /**
+   * Broadcast an arbitrary Server-Sent Event (SSE) to all connected dashboard clients
+   */
+  broadcastEvent(event: string, data: any): void {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of this.sseClients) {
+      try {
+        if (!client.writableEnded) {
+          client.write(payload);
+        }
+      } catch {
+        this.sseClients.delete(client);
+      }
+    }
+  }
+
+  /**
+   * Broadcast a log line from an actor or subsystem to live dashboard
+   */
+  broadcastLog(actor: string, message: string, level = 'info'): void {
+    this.broadcastEvent('log', {
+      timestamp: new Date().toISOString(),
+      actor,
+      message,
+      level,
+    });
+  }
+
+  /**
+   * Broadcast a pipeline progress update to live dashboard
+   */
+  broadcastProgress(step: string, status: string, detail?: string): void {
+    this.broadcastEvent('progress', {
+      timestamp: new Date().toISOString(),
+      step,
+      status,
+      detail,
+    });
+  }
+
+  /**
+   * Get current count of active SSE client connections
+   */
+  getActiveSseClientCount(): number {
+    return this.sseClients.size;
+  }
 
   /**
    * Calculate high-level factory metrics
@@ -81,7 +129,6 @@ export class ReporterService {
         ? Math.round((successfulExecutions / totalExecutions) * 100)
         : 100;
 
-    // Signals can be counted via references with signal:// scheme
     const signalRefs = references.filter((r) => r.scheme === 'signal');
 
     return {
@@ -284,7 +331,7 @@ ${mermaidGraph}
   }
 
   /**
-   * Generate a modern, responsive HTML dashboard
+   * Generate a modern, responsive HTML dashboard with real-time stream logs viewer
    */
   generateHtmlDashboard(options?: ReporterOptions): string {
     const timestamp = new Date().toISOString();
@@ -443,6 +490,25 @@ ${mermaidGraph}
       text-align: center;
       min-height: 180px;
     }
+    .terminal-box {
+      background: #05080c;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      height: 240px;
+      overflow-y: auto;
+      color: #c9d1d9;
+    }
+    .log-line { margin-bottom: 4px; word-break: break-word; }
+    .log-timestamp { color: #8b949e; margin-right: 8px; font-size: 11px; }
+    .log-actor { color: #58a6ff; font-weight: 600; margin-right: 8px; }
+    .log-info { color: #7ee787; }
+    .log-warn { color: #f2cc60; }
+    .log-error { color: #ff7b72; }
+    .log-muted { color: #8b949e; }
     .text-muted { color: var(--text-muted); }
     .btn {
       background: var(--primary);
@@ -492,6 +558,17 @@ ${mermaidGraph}
         <div class="kpi-title">Ingested Signals</div>
         <div class="kpi-value">${metrics.totalSignals}</div>
         <div class="kpi-sub">Telegram &bull; GitHub &bull; CLI</div>
+      </div>
+    </div>
+
+    <!-- Live Execution Stream & Logs Card -->
+    <div class="card">
+      <div class="card-title">
+        <span>🔴 Live Execution Stream & Logs</span>
+        <span id="stream-status" class="badge badge-warning">Connecting to /api/live...</span>
+      </div>
+      <div class="terminal-box" id="terminal-logs">
+        <div class="log-line"><span class="log-timestamp">[--:--:--]</span> <span class="log-actor">[System]</span> <span class="log-muted">Waiting for events from /api/live...</span></div>
       </div>
     </div>
 
@@ -551,6 +628,66 @@ ${mermaidGraph}
       Software Factory (Concept v31) &bull; Coordinates Humans, Agents & External Systems
     </footer>
   </div>
+
+  <script>
+    (function() {
+      const terminal = document.getElementById('terminal-logs');
+      const statusBadge = document.getElementById('stream-status');
+
+      function appendLog(text, actor, level) {
+        if (!terminal) return;
+        actor = actor || 'System';
+        level = level || 'info';
+        const time = new Date().toLocaleTimeString();
+        const line = document.createElement('div');
+        line.className = 'log-line';
+        line.innerHTML = '<span class="log-timestamp">[' + time + ']</span> ' +
+          '<span class="log-actor">[' + escapeHtmlText(actor) + ']</span> ' +
+          '<span class="log-' + level + '">' + escapeHtmlText(text) + '</span>';
+        terminal.appendChild(line);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+
+      function escapeHtmlText(str) {
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+      }
+
+      if (window.EventSource) {
+        const es = new EventSource('/api/live');
+        es.addEventListener('connected', function(e) {
+          if (statusBadge) {
+            statusBadge.textContent = '🟢 Live Connected';
+            statusBadge.className = 'badge badge-success';
+          }
+          appendLog('Live event stream connected', 'Dashboard', 'info');
+        });
+        es.addEventListener('log', function(e) {
+          try {
+            const data = JSON.parse(e.data);
+            appendLog(data.message, data.actor, data.level || 'info');
+          } catch (err) {}
+        });
+        es.addEventListener('progress', function(e) {
+          try {
+            const data = JSON.parse(e.data);
+            const msg = 'Progress [' + data.step + ']: ' + data.status + (data.detail ? ' (' + data.detail + ')' : '');
+            appendLog(msg, 'Pipeline', data.status === 'failed' ? 'error' : 'warn');
+          } catch (err) {}
+        });
+        es.onerror = function() {
+          if (statusBadge) {
+            statusBadge.textContent = '⚠️ Stream Disconnected';
+            statusBadge.className = 'badge badge-warning';
+          }
+        };
+      } else {
+        appendLog('EventSource is not supported in this browser.', 'Warning', 'error');
+      }
+    })();
+  </script>
 </body>
 </html>`;
   }
@@ -580,7 +717,7 @@ ${mermaidGraph}
   }
 
   /**
-   * Start a lightweight web dashboard HTTP server
+   * Start a lightweight web dashboard HTTP server with SSE support
    */
   async serveDashboard(
     port = 3000,
@@ -596,6 +733,24 @@ ${mermaidGraph}
           const html = this.generateHtmlDashboard({ workId });
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(html);
+          return;
+        }
+
+        // Server-Sent Events (SSE) Live Stream endpoint
+        if (pathname === '/api/live') {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+          });
+          res.write(
+            `event: connected\ndata: ${JSON.stringify({ time: new Date().toISOString(), message: 'Connected to Factory Live Stream' })}\n\n`,
+          );
+          this.sseClients.add(res);
+          req.on('close', () => {
+            this.sseClients.delete(res);
+          });
           return;
         }
 
@@ -640,6 +795,12 @@ ${mermaidGraph}
           port: actualPort,
           close: () =>
             new Promise<void>((closeResolve) => {
+              for (const client of this.sseClients) {
+                try {
+                  client.end();
+                } catch {}
+              }
+              this.sseClients.clear();
               server.close(() => closeResolve());
             }),
         });

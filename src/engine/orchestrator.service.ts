@@ -21,7 +21,9 @@ import { BaseAgentAdapter, AgentResult } from '../adapters/base.adapter';
 import { AgyAdapter } from '../adapters/agy.adapter';
 import { ClaudeAdapter } from '../adapters/claude.adapter';
 import { GitHubAdapter } from '../adapters/github.adapter';
+import { TelegramAdapter, TelegramProgressSession } from '../adapters/telegram.adapter';
 import { LineageService } from './lineage.service';
+import { ReporterService } from './reporter.service';
 import * as crypto from 'node:crypto';
 
 export interface PipelineOptions {
@@ -32,6 +34,12 @@ export interface PipelineOptions {
   branchName?: string;
   correlationId?: string;
   issueNumber?: number;
+  skipTests?: boolean;
+  testCommand?: string;
+  telegramNotification?: {
+    botToken: string;
+    chatId: number | string;
+  };
 }
 
 export interface PipelineResult {
@@ -58,6 +66,8 @@ export class OrchestratorService {
     private readonly agyAdapter: AgyAdapter,
     private readonly claudeAdapter: ClaudeAdapter,
     private readonly githubAdapter: GitHubAdapter,
+    private readonly telegramAdapter?: TelegramAdapter,
+    private readonly reporterService?: ReporterService,
   ) {
     this.registerAdapter(this.agyAdapter);
     this.registerAdapter(this.claudeAdapter);
@@ -295,146 +305,244 @@ export class OrchestratorService {
     const correlationId = options.correlationId || crypto.randomUUID();
     const now = new Date().toISOString();
 
-    // 0. Auto-detect GitHub repository if not provided
-    const repo = options.githubRepo || (await this.githubAdapter.detectRepo(workingDirectory)) || undefined;
+    // Setup Telegram live notification session if configured
+    const botToken = options.telegramNotification?.botToken || process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = options.telegramNotification?.chatId || process.env.TELEGRAM_CHAT_ID;
 
-    // 1. Step 0: Create GitHub Issue first (System of Record)
-    let issueNumber = options.issueNumber;
-    let issueUrl: string | undefined;
-
-    if (repo && !issueNumber) {
-      this.logger.log(`[Pipeline] Step 0: Creating GitHub Issue on ${repo}...`);
+    let telegramSession: TelegramProgressSession | null = null;
+    if (this.telegramAdapter && botToken && chatId) {
+      telegramSession = this.telegramAdapter.createProgressSession(
+        botToken,
+        chatId,
+        title,
+        [
+          { key: 'issue', label: 'ثبت Issue در گیت‌هاب' },
+          { key: 'branch', label: 'ساخت برنچ ایزوله' },
+          { key: 'implement', label: 'پیاده‌سازی کد (agy)' },
+          { key: 'review', label: 'بازبینی و ممیزی کد (claude)' },
+          { key: 'test', label: 'اجرای تست‌های خودکار' },
+          { key: 'pr', label: 'ساخت Pull Request' },
+        ],
+      );
       try {
-        const issue = await this.githubAdapter.createIssue(
-          repo,
-          title,
-          `## Software Factory Request\n\n${description}\n\n---\n*Created automatically by Software Factory Coordinator.*`,
-          ['factory'],
-        );
-        issueNumber = issue.number;
-        issueUrl = issue.url;
-        this.logger.log(`[Pipeline] GitHub Issue created: ${issueUrl} (#${issueNumber})`);
+        await telegramSession.start();
+      } catch (err: any) {
+        this.logger.warn(`[Pipeline] Failed to start Telegram progress message: ${err.message}`);
+      }
+    }
 
-        // Record Issue Reference
-        const issueRefUri = CanonicalUri.githubIssue(repo, issueNumber);
-        this.store.saveReference({
+    const notifyStepStart = async (stepKey: string, detail?: string) => {
+      this.reporterService?.broadcastProgress(stepKey, 'in_progress', detail);
+      this.reporterService?.broadcastLog('Pipeline', `Starting ${stepKey}... ${detail ? `(${detail})` : ''}`);
+      if (telegramSession) {
+        try {
+          await telegramSession.setStepInProgress(stepKey, detail);
+        } catch {}
+      }
+    };
+
+    const notifyStepComplete = async (stepKey: string, detail?: string) => {
+      this.reporterService?.broadcastProgress(stepKey, 'completed', detail);
+      this.reporterService?.broadcastLog('Pipeline', `Completed ${stepKey}. ${detail ? `(${detail})` : ''}`);
+      if (telegramSession) {
+        try {
+          await telegramSession.completeStep(stepKey, detail);
+        } catch {}
+      }
+    };
+
+    const notifyFailure = async (error: string, failedKey?: string) => {
+      this.reporterService?.broadcastProgress(failedKey || 'pipeline', 'failed', error);
+      this.reporterService?.broadcastLog('Pipeline', `Error in ${failedKey || 'pipeline'}: ${error}`, 'error');
+      if (telegramSession) {
+        try {
+          await telegramSession.fail(error, failedKey);
+        } catch {}
+      }
+    };
+
+    try {
+      // 0. Auto-detect GitHub repository if not provided
+      const repo = options.githubRepo || (await this.githubAdapter.detectRepo(workingDirectory)) || undefined;
+
+      // 1. Step 0: Create GitHub Issue first (System of Record)
+      let issueNumber = options.issueNumber;
+      let issueUrl: string | undefined;
+
+      if (repo && !issueNumber) {
+        await notifyStepStart('issue', `مخزن: ${repo}`);
+        this.logger.log(`[Pipeline] Step 0: Creating GitHub Issue on ${repo}...`);
+        try {
+          const issue = await this.githubAdapter.createIssue(
+            repo,
+            title,
+            `## Software Factory Request\n\n${description}\n\n---\n*Created automatically by Software Factory Coordinator.*`,
+            ['factory'],
+          );
+          issueNumber = issue.number;
+          issueUrl = issue.url;
+          this.logger.log(`[Pipeline] GitHub Issue created: ${issueUrl} (#${issueNumber})`);
+
+          // Record Issue Reference
+          const issueRefUri = CanonicalUri.githubIssue(repo, issueNumber);
+          this.store.saveReference({
+            id: crypto.randomUUID(),
+            uri: issueRefUri,
+            scheme: 'github',
+            targetType: 'issue',
+            metadata: { url: issueUrl, number: issueNumber },
+            createdAt: now,
+          });
+          await notifyStepComplete('issue', `#${issueNumber}`);
+        } catch (err: any) {
+          this.logger.error(`[Pipeline] Failed to create GitHub Issue: ${err.message}`);
+          await notifyStepComplete('issue', 'خطا در ثبت Issue');
+        }
+      } else if (issueNumber) {
+        await notifyStepComplete('issue', `#${issueNumber} (از پیش تعیین‌شده)`);
+      } else {
+        await notifyStepComplete('issue', 'بدون مخزن گیت‌هاب');
+      }
+
+      // 2. Step 1: Create isolated Git Branch
+      const branchSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+      const branchName = options.branchName || (issueNumber ? `feature/issue-${issueNumber}-${branchSlug}` : `feature/factory-${branchSlug}`);
+
+      await notifyStepStart('branch', branchName);
+      if (repo) {
+        try {
+          await this.githubAdapter.createBranch(workingDirectory, branchName);
+          this.logger.log(`[Pipeline] Created git branch: ${branchName}`);
+          await notifyStepComplete('branch', branchName);
+        } catch (err: any) {
+          this.logger.warn(`[Pipeline] Branch ${branchName} already exists or checkout warning: ${err.message}`);
+          await notifyStepComplete('branch', `${branchName} (موجود)`);
+        }
+      } else {
+        await notifyStepComplete('branch', branchName);
+      }
+
+      // 3. Step 2: Implementation Work (agy with auto-fallback to claude)
+      await notifyStepStart('implement', 'در حال اجرا توسط agy');
+      const implWorkId = crypto.randomUUID();
+      const implWork: Work = {
+        id: implWorkId,
+        title: `Implementation: ${title}`,
+        description,
+        type: WorkType.IMPLEMENTATION,
+        status: WorkStatus.PENDING,
+        priority: WorkPriority.HIGH,
+        context: { correlationId, branchName, githubRepo: repo, issueNumber },
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.store.saveWork(implWork);
+
+      if (issueNumber && repo) {
+        this.store.saveRelation({
           id: crypto.randomUUID(),
-          uri: issueRefUri,
-          scheme: 'github',
-          targetType: 'issue',
-          metadata: { url: issueUrl, number: issueNumber },
+          sourceRef: CanonicalUri.factoryWork(implWorkId),
+          targetRef: CanonicalUri.githubIssue(repo, issueNumber),
+          relationType: RelationType.TRIGGERED_BY,
+          metadata: {},
           createdAt: now,
         });
-      } catch (err: any) {
-        this.logger.error(`[Pipeline] Failed to create GitHub Issue: ${err.message}`);
       }
-    }
 
-    // 2. Step 1: Create isolated Git Branch
-    const branchSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
-    const branchName = options.branchName || (issueNumber ? `feature/issue-${issueNumber}-${branchSlug}` : `feature/factory-${branchSlug}`);
-
-    if (repo) {
-      try {
-        await this.githubAdapter.createBranch(workingDirectory, branchName);
-        this.logger.log(`[Pipeline] Created git branch: ${branchName}`);
-      } catch (err: any) {
-        this.logger.warn(`[Pipeline] Branch ${branchName} already exists or checkout warning: ${err.message}`);
+      this.logger.log(`[Pipeline] Step 2: Running Implementation with agy...`);
+      let implResult = await this.executeWork(implWorkId, 'agy', workingDirectory, 300);
+      if (implResult.logs) {
+        this.reporterService?.broadcastLog('agy', implResult.logs.slice(-500));
       }
-    }
 
-    // 3. Step 2: Implementation Work (agy with auto-fallback to claude)
-    const implWorkId = crypto.randomUUID();
-    const implWork: Work = {
-      id: implWorkId,
-      title: `Implementation: ${title}`,
-      description,
-      type: WorkType.IMPLEMENTATION,
-      status: WorkStatus.PENDING,
-      priority: WorkPriority.HIGH,
-      context: { correlationId, branchName, githubRepo: repo, issueNumber },
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.store.saveWork(implWork);
+      // Fallback to claude if agy failed or soft-denied
+      if (implResult.status !== ExecutionStatus.COMPLETED) {
+        this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
+        this.reporterService?.broadcastLog('Pipeline', 'سوییچ خودکار به claude جهت پیاده‌سازی...', 'warn');
+        implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 300);
+        if (implResult.logs) {
+          this.reporterService?.broadcastLog('claude', implResult.logs.slice(-500));
+        }
+      }
+      await notifyStepComplete('implement', implResult.status === ExecutionStatus.COMPLETED ? 'موفق' : 'دارای خطا');
 
-    if (issueNumber && repo) {
+      // 4. Step 3: Review & Verification Work via claude
+      await notifyStepStart('review', 'در حال بازبینی توسط claude');
+      const reviewWorkId = crypto.randomUUID();
+      const reviewWork: Work = {
+        id: reviewWorkId,
+        title: `Review & Verification: ${title}`,
+        description: `Review the changes and verify code quality for implementation: ${title}.\n\nImplementation Output:\n${implResult.logs.slice(-1000)}`,
+        type: WorkType.REVIEW,
+        status: WorkStatus.PENDING,
+        priority: WorkPriority.HIGH,
+        context: { correlationId, implWorkId, branchName, issueNumber },
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      this.store.saveWork(reviewWork);
+
       this.store.saveRelation({
         id: crypto.randomUUID(),
-        sourceRef: CanonicalUri.factoryWork(implWorkId),
-        targetRef: CanonicalUri.githubIssue(repo, issueNumber),
-        relationType: RelationType.TRIGGERED_BY,
+        sourceRef: CanonicalUri.factoryWork(reviewWorkId),
+        targetRef: CanonicalUri.factoryWork(implWorkId),
+        relationType: RelationType.VERIFIES,
         metadata: {},
-        createdAt: now,
+        createdAt: new Date().toISOString(),
       });
-    }
 
-    this.logger.log(`[Pipeline] Step 2: Running Implementation with agy...`);
-    let implResult = await this.executeWork(implWorkId, 'agy', workingDirectory, 300);
+      this.logger.log(`[Pipeline] Step 3: Running Review with claude...`);
+      const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, 300);
+      if (reviewResult.logs) {
+        this.reporterService?.broadcastLog('claude', reviewResult.logs.slice(-500));
+      }
+      await notifyStepComplete('review', reviewResult.status === ExecutionStatus.COMPLETED ? 'تأیید شد' : 'دارای هشدار');
 
-    // Fallback to claude if agy failed or soft-denied
-    if (implResult.status !== ExecutionStatus.COMPLETED) {
-      this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
-      implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 300);
-    }
+      // 5. Step 4: Run Automated Tests
+      await notifyStepStart('test', 'اجرای تست‌های خودکار');
+      this.logger.log(`[Pipeline] Step 4: Running project automated tests...`);
+      let testPassed = false;
+      let testOutput = '';
+      if (options.skipTests) {
+        testPassed = true;
+        testOutput = 'Automated tests skipped by pipeline configuration';
+        this.logger.log(`[Pipeline] Tests skipped via options.skipTests`);
+        this.reporterService?.broadcastLog('TestRunner', 'تست‌های خودکار با تنظیمات پایپ‌لاین رد شدند.');
+        await notifyStepComplete('test', 'تست‌ها رد شدند (skip)');
+      } else {
+        try {
+          const { exec } = await import('node:child_process');
+          const { promisify } = await import('node:util');
+          const execAsync = promisify(exec);
+          const cmd = options.testCommand || 'pnpm test || npm test';
+          const testRes = await execAsync(cmd, { cwd: workingDirectory });
+          testPassed = true;
+          testOutput = testRes.stdout || testRes.stderr;
+          this.logger.log(`[Pipeline] All automated tests passed!`);
+          this.reporterService?.broadcastLog('TestRunner', 'تمامی تست‌های خودکار با موفقیت پاس شدند.');
+          await notifyStepComplete('test', '✅ تست‌ها با موفقیت پاس شدند');
+        } catch (err: any) {
+          testPassed = false;
+          testOutput = err.stdout || err.stderr || err.message;
+          this.logger.warn(`[Pipeline] Automated tests failed or had findings: ${err.message}`);
+          this.reporterService?.broadcastLog('TestRunner', `خطا در اجرای تست: ${err.message}`, 'warn');
+          await notifyStepComplete('test', '⚠️ دارای خطای تست');
+        }
+      }
 
-    // 4. Step 3: Review & Verification Work via claude
-    const reviewWorkId = crypto.randomUUID();
-    const reviewWork: Work = {
-      id: reviewWorkId,
-      title: `Review & Verification: ${title}`,
-      description: `Review the changes and verify code quality for implementation: ${title}.\n\nImplementation Output:\n${implResult.logs.slice(-1000)}`,
-      type: WorkType.REVIEW,
-      status: WorkStatus.PENDING,
-      priority: WorkPriority.HIGH,
-      context: { correlationId, implWorkId, branchName, issueNumber },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.saveWork(reviewWork);
+      // 6. Step 5: Git Commit, Push & Create Pull Request
+      let prUrl: string | undefined;
+      let prNumber: number | undefined;
 
-    this.store.saveRelation({
-      id: crypto.randomUUID(),
-      sourceRef: CanonicalUri.factoryWork(reviewWorkId),
-      targetRef: CanonicalUri.factoryWork(implWorkId),
-      relationType: RelationType.VERIFIES,
-      metadata: {},
-      createdAt: new Date().toISOString(),
-    });
+      if (repo) {
+        await notifyStepStart('pr', 'ارسال تغییرات و ساخت PR');
+        try {
+          this.logger.log(`[Pipeline] Step 5: Committing, pushing, and creating Pull Request...`);
+          const commitMsg = `feat: ${title}${issueNumber ? ` (refs #${issueNumber})` : ''}\n\nCoordinated by Software Factory.\nImplementer: ${implResult.status === ExecutionStatus.COMPLETED ? 'agy/claude' : 'claude'}\nReviewer: claude`;
+          await this.githubAdapter.commitAll(workingDirectory, commitMsg);
+          await this.githubAdapter.pushBranch(workingDirectory, branchName);
 
-    this.logger.log(`[Pipeline] Step 3: Running Review with claude...`);
-    const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, 300);
-
-    // 5. Step 4: Run Automated Tests
-    this.logger.log(`[Pipeline] Step 4: Running project automated tests...`);
-    let testPassed = false;
-    let testOutput = '';
-    try {
-      const { exec } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const execAsync = promisify(exec);
-      const testRes = await execAsync('pnpm test || npm test', { cwd: workingDirectory });
-      testPassed = true;
-      testOutput = testRes.stdout || testRes.stderr;
-      this.logger.log(`[Pipeline] All automated tests passed!`);
-    } catch (err: any) {
-      testPassed = false;
-      testOutput = err.stdout || err.stderr || err.message;
-      this.logger.warn(`[Pipeline] Automated tests failed or had findings: ${err.message}`);
-    }
-
-    // 6. Step 5: Git Commit, Push & Create Pull Request
-    let prUrl: string | undefined;
-    let prNumber: number | undefined;
-
-    if (repo) {
-      try {
-        this.logger.log(`[Pipeline] Step 5: Committing, pushing, and creating Pull Request...`);
-        const commitMsg = `feat: ${title}${issueNumber ? ` (refs #${issueNumber})` : ''}\n\nCoordinated by Software Factory.\nImplementer: ${implResult.status === ExecutionStatus.COMPLETED ? 'agy/claude' : 'claude'}\nReviewer: claude`;
-        await this.githubAdapter.commitAll(workingDirectory, commitMsg);
-        await this.githubAdapter.pushBranch(workingDirectory, branchName);
-
-        const prBody = `## Software Factory Automation Report
+          const prBody = `## Software Factory Automation Report
 
 ${issueNumber ? `Closes #${issueNumber}\n` : ''}
 
@@ -457,54 +565,64 @@ ${testOutput.slice(-500)}
 *Human Gate Approval: Ali (@ali-ahadi1105)*
 `;
 
-        const pr = await this.githubAdapter.createPullRequest(
-          workingDirectory,
-          `feat: ${title}${issueNumber ? ` (#${issueNumber})` : ''}`,
-          prBody,
-          'main',
-        );
+          const pr = await this.githubAdapter.createPullRequest(
+            workingDirectory,
+            `feat: ${title}${issueNumber ? ` (#${issueNumber})` : ''}`,
+            prBody,
+            'main',
+          );
 
-        prUrl = pr.url;
-        prNumber = pr.number;
-        this.logger.log(`[Pipeline] Pull Request created: ${prUrl} (#${prNumber})`);
+          prUrl = pr.url;
+          prNumber = pr.number;
+          this.logger.log(`[Pipeline] Pull Request created: ${prUrl} (#${prNumber})`);
 
-        // Record PR Reference and Relation
-        const prRefUri = CanonicalUri.githubPr(repo, pr.number);
-        this.store.saveReference({
-          id: crypto.randomUUID(),
-          uri: prRefUri,
-          scheme: 'github',
-          targetType: 'pull_request',
-          metadata: { url: pr.url, number: pr.number, issueNumber },
-          createdAt: new Date().toISOString(),
-        });
+          // Record PR Reference and Relation
+          const prRefUri = CanonicalUri.githubPr(repo, pr.number);
+          this.store.saveReference({
+            id: crypto.randomUUID(),
+            uri: prRefUri,
+            scheme: 'github',
+            targetType: 'pull_request',
+            metadata: { url: pr.url, number: pr.number, issueNumber },
+            createdAt: new Date().toISOString(),
+          });
 
-        this.store.saveRelation({
-          id: crypto.randomUUID(),
-          sourceRef: CanonicalUri.factoryWork(implWorkId),
-          targetRef: prRefUri,
-          relationType: RelationType.PRODUCED,
-          metadata: {},
-          createdAt: new Date().toISOString(),
-        });
-      } catch (err: any) {
-        this.logger.error(`[Pipeline] Error during Git/PR step: ${err.message}`);
+          this.store.saveRelation({
+            id: crypto.randomUUID(),
+            sourceRef: CanonicalUri.factoryWork(implWorkId),
+            targetRef: prRefUri,
+            relationType: RelationType.PRODUCED,
+            metadata: {},
+            createdAt: new Date().toISOString(),
+          });
+
+          await notifyStepComplete('pr', prUrl);
+          if (telegramSession) {
+            await telegramSession.finish(prUrl);
+          }
+        } catch (err: any) {
+          this.logger.error(`[Pipeline] Error during Git/PR step: ${err.message}`);
+          await notifyFailure(err.message, 'pr');
+        }
       }
+
+      const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
+
+      return {
+        workId: implWorkId,
+        issueNumber,
+        issueUrl,
+        branchName,
+        prUrl,
+        prNumber,
+        testPassed,
+        implementationLogs: implResult.logs,
+        reviewLogs: reviewResult.logs,
+        lineageTree,
+      };
+    } catch (err: any) {
+      await notifyFailure(err.message);
+      throw err;
     }
-
-    const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
-
-    return {
-      workId: implWorkId,
-      issueNumber,
-      issueUrl,
-      branchName,
-      prUrl,
-      prNumber,
-      testPassed,
-      implementationLogs: implResult.logs,
-      reviewLogs: reviewResult.logs,
-      lineageTree,
-    };
   }
 }

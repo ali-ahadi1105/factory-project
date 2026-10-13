@@ -4,12 +4,17 @@ import { ExecutionStatus, Work, Execution, CanonicalUri } from '../core';
 
 @Injectable()
 export class MockAgentAdapter extends BaseAgentAdapter {
-  readonly id = 'mock-agent';
+  readonly id: string;
   readonly name = 'Mock Testing Agent';
   readonly capabilities = ['code_generation', 'code_review', 'planning', 'testing'];
 
   public shouldFail = false;
   public customLogs = 'Mock agent execution succeeded.';
+
+  constructor(customId = 'mock-agent') {
+    super();
+    this.id = customId;
+  }
 
   async isAvailable(): Promise<boolean> {
     return true;
