@@ -88,7 +88,19 @@ export class AgyAdapter extends BaseAgentAdapter {
           }
         } catch {}
 
-        const status = code === 0 ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED;
+        const isSoftDenied =
+          output.includes('a tool required the "command" permission') ||
+          output.includes('no output produced — a tool required') ||
+          output.includes('Eligibility check failed');
+
+        const isFailed = code !== 0 || isSoftDenied;
+        const status = isFailed ? ExecutionStatus.FAILED : ExecutionStatus.COMPLETED;
+        const error = isSoftDenied
+          ? 'Tool permission soft-denied or prompt denied in headless mode'
+          : code !== 0
+            ? `Process exited with code ${code}`
+            : undefined;
+
         const producedReferences: string[] = [
           CanonicalUri.agentRun(this.id, execution.id),
         ];
@@ -96,7 +108,7 @@ export class AgyAdapter extends BaseAgentAdapter {
         resolve({
           status,
           logs: output,
-          error: code !== 0 ? `Process exited with code ${code}` : undefined,
+          error,
           producedReferences,
         });
       });

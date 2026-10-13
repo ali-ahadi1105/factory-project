@@ -31,13 +31,17 @@ export interface PipelineOptions {
   githubRepo?: string;
   branchName?: string;
   correlationId?: string;
+  issueNumber?: number;
 }
 
 export interface PipelineResult {
   workId: string;
+  issueNumber?: number;
+  issueUrl?: string;
   branchName?: string;
   prUrl?: string;
   prNumber?: number;
+  testPassed: boolean;
   implementationLogs: string;
   reviewLogs: string;
   lineageTree: string;
@@ -287,24 +291,59 @@ export class OrchestratorService {
   // --- FULL END-TO-END PIPELINE ---
 
   async runPipeline(options: PipelineOptions): Promise<PipelineResult> {
-    const { title, description, workingDirectory, githubRepo } = options;
+    const { title, description, workingDirectory } = options;
     const correlationId = options.correlationId || crypto.randomUUID();
-    const branchName = options.branchName || `feature/factory-${Date.now().toString(36)}`;
     const now = new Date().toISOString();
 
-    this.logger.log(`Starting Software Factory Pipeline for "${title}" on branch ${branchName}...`);
+    // 0. Auto-detect GitHub repository if not provided
+    const repo = options.githubRepo || (await this.githubAdapter.detectRepo(workingDirectory)) || undefined;
 
-    // 1. Create Git branch if GitHub repo configured
-    if (githubRepo) {
+    // 1. Step 0: Create GitHub Issue first (System of Record)
+    let issueNumber = options.issueNumber;
+    let issueUrl: string | undefined;
+
+    if (repo && !issueNumber) {
+      this.logger.log(`[Pipeline] Step 0: Creating GitHub Issue on ${repo}...`);
       try {
-        await this.githubAdapter.createBranch(workingDirectory, branchName);
-        this.logger.log(`Created git branch: ${branchName}`);
+        const issue = await this.githubAdapter.createIssue(
+          repo,
+          title,
+          `## Software Factory Request\n\n${description}\n\n---\n*Created automatically by Software Factory Coordinator.*`,
+          ['factory'],
+        );
+        issueNumber = issue.number;
+        issueUrl = issue.url;
+        this.logger.log(`[Pipeline] GitHub Issue created: ${issueUrl} (#${issueNumber})`);
+
+        // Record Issue Reference
+        const issueRefUri = CanonicalUri.githubIssue(repo, issueNumber);
+        this.store.saveReference({
+          id: crypto.randomUUID(),
+          uri: issueRefUri,
+          scheme: 'github',
+          targetType: 'issue',
+          metadata: { url: issueUrl, number: issueNumber },
+          createdAt: now,
+        });
       } catch (err: any) {
-        this.logger.warn(`Could not create branch ${branchName} (might already exist): ${err.message}`);
+        this.logger.error(`[Pipeline] Failed to create GitHub Issue: ${err.message}`);
       }
     }
 
-    // 2. Step 1: Implementation Work via agy
+    // 2. Step 1: Create isolated Git Branch
+    const branchSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 30);
+    const branchName = options.branchName || (issueNumber ? `feature/issue-${issueNumber}-${branchSlug}` : `feature/factory-${branchSlug}`);
+
+    if (repo) {
+      try {
+        await this.githubAdapter.createBranch(workingDirectory, branchName);
+        this.logger.log(`[Pipeline] Created git branch: ${branchName}`);
+      } catch (err: any) {
+        this.logger.warn(`[Pipeline] Branch ${branchName} already exists or checkout warning: ${err.message}`);
+      }
+    }
+
+    // 3. Step 2: Implementation Work (agy with auto-fallback to claude)
     const implWorkId = crypto.randomUUID();
     const implWork: Work = {
       id: implWorkId,
@@ -313,31 +352,47 @@ export class OrchestratorService {
       type: WorkType.IMPLEMENTATION,
       status: WorkStatus.PENDING,
       priority: WorkPriority.HIGH,
-      context: { correlationId, branchName, githubRepo },
+      context: { correlationId, branchName, githubRepo: repo, issueNumber },
       createdAt: now,
       updatedAt: now,
     };
     this.store.saveWork(implWork);
 
-    this.logger.log(`Step 1: Running Implementation with agy...`);
-    const implResult = await this.executeWork(implWorkId, 'agy', workingDirectory, 360);
+    if (issueNumber && repo) {
+      this.store.saveRelation({
+        id: crypto.randomUUID(),
+        sourceRef: CanonicalUri.factoryWork(implWorkId),
+        targetRef: CanonicalUri.githubIssue(repo, issueNumber),
+        relationType: RelationType.TRIGGERED_BY,
+        metadata: {},
+        createdAt: now,
+      });
+    }
 
-    // 3. Step 2: Code Review & Verification Work via claude
+    this.logger.log(`[Pipeline] Step 2: Running Implementation with agy...`);
+    let implResult = await this.executeWork(implWorkId, 'agy', workingDirectory, 300);
+
+    // Fallback to claude if agy failed or soft-denied
+    if (implResult.status !== ExecutionStatus.COMPLETED) {
+      this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
+      implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 300);
+    }
+
+    // 4. Step 3: Review & Verification Work via claude
     const reviewWorkId = crypto.randomUUID();
     const reviewWork: Work = {
       id: reviewWorkId,
       title: `Review & Verification: ${title}`,
-      description: `Review the changes and verify code quality for implementation: ${title}.\nImplementation Logs:\n${implResult.logs.slice(-1000)}`,
+      description: `Review the changes and verify code quality for implementation: ${title}.\n\nImplementation Output:\n${implResult.logs.slice(-1000)}`,
       type: WorkType.REVIEW,
       status: WorkStatus.PENDING,
       priority: WorkPriority.HIGH,
-      context: { correlationId, implWorkId, branchName },
+      context: { correlationId, implWorkId, branchName, issueNumber },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
     this.store.saveWork(reviewWork);
 
-    // Record relation: review-work verifies implementation-work
     this.store.saveRelation({
       id: crypto.randomUUID(),
       sourceRef: CanonicalUri.factoryWork(reviewWorkId),
@@ -347,61 +402,80 @@ export class OrchestratorService {
       createdAt: new Date().toISOString(),
     });
 
-    this.logger.log(`Step 2: Running Review with claude...`);
+    this.logger.log(`[Pipeline] Step 3: Running Review with claude...`);
     const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, 300);
 
-    // 4. Step 3: Git Commit and Pull Request (if GitHub configured)
+    // 5. Step 4: Run Automated Tests
+    this.logger.log(`[Pipeline] Step 4: Running project automated tests...`);
+    let testPassed = false;
+    let testOutput = '';
+    try {
+      const { exec } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execAsync = promisify(exec);
+      const testRes = await execAsync('pnpm test || npm test', { cwd: workingDirectory });
+      testPassed = true;
+      testOutput = testRes.stdout || testRes.stderr;
+      this.logger.log(`[Pipeline] All automated tests passed!`);
+    } catch (err: any) {
+      testPassed = false;
+      testOutput = err.stdout || err.stderr || err.message;
+      this.logger.warn(`[Pipeline] Automated tests failed or had findings: ${err.message}`);
+    }
+
+    // 6. Step 5: Git Commit, Push & Create Pull Request
     let prUrl: string | undefined;
     let prNumber: number | undefined;
 
-    if (githubRepo) {
+    if (repo) {
       try {
-        this.logger.log(`Step 3: Committing and creating Pull Request...`);
-        const commitSha = await this.githubAdapter.commitAll(
-          workingDirectory,
-          `feat: ${title}\n\nCoordinated by Software Factory.\nImplementer: agy (Gemini 3.8 Flash)\nReviewer: claude (Thinking)`,
-        );
-
+        this.logger.log(`[Pipeline] Step 5: Committing, pushing, and creating Pull Request...`);
+        const commitMsg = `feat: ${title}${issueNumber ? ` (refs #${issueNumber})` : ''}\n\nCoordinated by Software Factory.\nImplementer: ${implResult.status === ExecutionStatus.COMPLETED ? 'agy/claude' : 'claude'}\nReviewer: claude`;
+        await this.githubAdapter.commitAll(workingDirectory, commitMsg);
         await this.githubAdapter.pushBranch(workingDirectory, branchName);
 
         const prBody = `## Software Factory Automation Report
 
-**Title:** ${title}
-**Status:** Ready for Human Gate Review & Approval
+${issueNumber ? `Closes #${issueNumber}\n` : ''}
 
-### Agents Involved:
-- **Implementer:** \`agy\` (Gemini 3.8 Flash)
-- **Reviewer:** \`claude\` (Claude Code Thinking)
-- **Human Gate:** Ali (@ali-ahadi1105)
+### Summary
+${description}
 
 ### Verification Summary:
 \`\`\`
-${reviewResult.logs.slice(-500)}
+${reviewResult.logs.slice(-1000)}
+\`\`\`
+
+### Automated Tests:
+${testPassed ? '✅ All automated test suites passed.' : '⚠️ Tests encountered issues (inspect output below):'}
+\`\`\`
+${testOutput.slice(-500)}
 \`\`\`
 
 ---
 *Coordinated by Software Factory (System of Coordination v31)*
+*Human Gate Approval: Ali (@ali-ahadi1105)*
 `;
 
         const pr = await this.githubAdapter.createPullRequest(
           workingDirectory,
-          `[Factory] ${title}`,
+          `feat: ${title}${issueNumber ? ` (#${issueNumber})` : ''}`,
           prBody,
           'main',
         );
 
         prUrl = pr.url;
         prNumber = pr.number;
-        this.logger.log(`Pull Request created: ${prUrl}`);
+        this.logger.log(`[Pipeline] Pull Request created: ${prUrl} (#${prNumber})`);
 
         // Record PR Reference and Relation
-        const prRefUri = CanonicalUri.githubPr(githubRepo, pr.number);
+        const prRefUri = CanonicalUri.githubPr(repo, pr.number);
         this.store.saveReference({
           id: crypto.randomUUID(),
           uri: prRefUri,
           scheme: 'github',
           targetType: 'pull_request',
-          metadata: { url: pr.url, number: pr.number },
+          metadata: { url: pr.url, number: pr.number, issueNumber },
           createdAt: new Date().toISOString(),
         });
 
@@ -414,7 +488,7 @@ ${reviewResult.logs.slice(-500)}
           createdAt: new Date().toISOString(),
         });
       } catch (err: any) {
-        this.logger.error(`Error during Git/PR step: ${err.message}`);
+        this.logger.error(`[Pipeline] Error during Git/PR step: ${err.message}`);
       }
     }
 
@@ -422,9 +496,12 @@ ${reviewResult.logs.slice(-500)}
 
     return {
       workId: implWorkId,
+      issueNumber,
+      issueUrl,
       branchName,
       prUrl,
       prNumber,
+      testPassed,
       implementationLogs: implResult.logs,
       reviewLogs: reviewResult.logs,
       lineageTree,

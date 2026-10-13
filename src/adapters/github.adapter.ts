@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { exec } from 'node:child_process';
 import { promisify } from 'node:util';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const execAsync = promisify(exec);
 
@@ -31,6 +33,20 @@ export class GitHubAdapter {
       return stdout.includes('gh version');
     } catch {
       return false;
+    }
+  }
+
+  async detectRepo(cwd: string): Promise<string | null> {
+    try {
+      const { stdout } = await execAsync('git remote get-url origin', { cwd });
+      const raw = stdout.trim();
+      const match = raw.match(/github\.com[:/]([^/]+)\/([^/.]+?)(?:\.git)?$/);
+      if (match) {
+        return `${match[1]}/${match[2]}`;
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
@@ -96,20 +112,33 @@ export class GitHubAdapter {
     body: string,
     base = 'main',
   ): Promise<GitHubPr> {
-    const cmd = `gh pr create --title "${title}" --body "${body}" --base "${base}"`;
-    const { stdout } = await execAsync(cmd, { cwd });
-    const url = stdout.trim();
-    const match = url.match(/\/pull\/(\d+)$/);
-    const number = match ? parseInt(match[1], 10) : 0;
+    const tmpBodyFile = path.join(os.tmpdir(), `gh_pr_body_${Date.now()}_${Math.random().toString(36).slice(2)}.md`);
+    const fs = await import('node:fs');
+    fs.writeFileSync(tmpBodyFile, body, 'utf-8');
 
-    return {
-      number,
-      title,
-      url,
-      state: 'OPEN',
-      headRefName: '',
-      baseRefName: base,
-    };
+    try {
+      const escapedTitle = title.replace(/"/g, '\\"');
+      const cmd = `gh pr create --title "${escapedTitle}" --body-file "${tmpBodyFile}" --base "${base}"`;
+      const { stdout } = await execAsync(cmd, { cwd });
+      const url = stdout.trim();
+      const match = url.match(/\/pull\/(\d+)$/);
+      const number = match ? parseInt(match[1], 10) : 0;
+
+      return {
+        number,
+        title,
+        url,
+        state: 'OPEN',
+        headRefName: '',
+        baseRefName: base,
+      };
+    } finally {
+      try {
+        if (fs.existsSync(tmpBodyFile)) {
+          fs.unlinkSync(tmpBodyFile);
+        }
+      } catch {}
+    }
   }
 
   async mergePullRequest(cwd: string, prNumber: number): Promise<boolean> {
