@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { DatabaseService, FactoryStoreService } from './store';
-import { LineageService, OrchestratorService } from './engine';
+import { LineageService, OrchestratorService, ReporterService } from './engine';
 import {
   AgyAdapter,
   ClaudeAdapter,
@@ -14,6 +14,7 @@ import {
     DatabaseService,
     FactoryStoreService,
     LineageService,
+    ReporterService,
     AgyAdapter,
     ClaudeAdapter,
     MockAgentAdapter,
@@ -25,6 +26,7 @@ import {
     DatabaseService,
     FactoryStoreService,
     LineageService,
+    ReporterService,
     OrchestratorService,
     GitHubAdapter,
     TelegramAdapter,

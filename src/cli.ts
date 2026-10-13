@@ -2,10 +2,11 @@
 import 'reflect-metadata';
 import { Command } from 'commander';
 import { DatabaseService, FactoryStoreService } from './store';
-import { LineageService, OrchestratorService } from './engine';
+import { LineageService, OrchestratorService, ReporterService } from './engine';
 import { AgyAdapter, ClaudeAdapter, GitHubAdapter } from './adapters';
 import { WorkStatus, WorkType, WorkPriority, CanonicalUri } from './core';
 import * as crypto from 'node:crypto';
+import * as path from 'node:path';
 
 const program = new Command();
 
@@ -14,6 +15,7 @@ function initServices() {
   dbService.connect();
   const store = new FactoryStoreService(dbService);
   const lineage = new LineageService(store);
+  const reporter = new ReporterService(store, lineage);
   const agyAdapter = new AgyAdapter();
   const claudeAdapter = new ClaudeAdapter();
   const githubAdapter = new GitHubAdapter();
@@ -24,7 +26,7 @@ function initServices() {
     claudeAdapter,
     githubAdapter,
   );
-  return { dbService, store, lineage, orchestrator, githubAdapter };
+  return { dbService, store, lineage, reporter, orchestrator, githubAdapter };
 }
 
 program
@@ -148,6 +150,45 @@ program
     const { lineage } = initServices();
     const uri = rootRef.includes('://') ? rootRef : CanonicalUri.factoryWork(rootRef);
     console.log(lineage.formatAsciiTree(uri));
+  });
+
+// report command
+program
+  .command('report')
+  .description('Generate HTML or Markdown report for the factory or specific work item')
+  .option('-f, --format <format>', 'Report format: html or markdown', 'html')
+  .option('-w, --work <workId>', 'Target specific Work ID')
+  .option('-o, --out <path>', 'Output file path')
+  .action((options) => {
+    const { reporter } = initServices();
+    const format = options.format.toLowerCase() === 'markdown' ? 'markdown' : 'html';
+    const defaultFilename = options.work
+      ? `factory-work-${options.work}.${format === 'markdown' ? 'md' : 'html'}`
+      : `factory-report.${format === 'markdown' ? 'md' : 'html'}`;
+    const outPath = options.out || path.join(process.cwd(), 'reports', defaultFilename);
+
+    const generated = reporter.exportReport(outPath, format, { workId: options.work });
+    console.log(`✅ ${format.toUpperCase()} report generated: ${generated}`);
+  });
+
+// dashboard command
+program
+  .command('dashboard')
+  .description('Start live web dashboard server')
+  .option('-p, --port <port>', 'Port number to listen on', '3000')
+  .option('-h, --host <host>', 'Host address to bind', '0.0.0.0')
+  .action(async (options) => {
+    const { reporter } = initServices();
+    const port = parseInt(options.port, 10);
+    const host = options.host;
+    console.log(`🚀 Starting Software Factory Dashboard on http://${host}:${port}...`);
+    try {
+      await reporter.serveDashboard(port, host);
+      console.log(`✅ Dashboard running! Open http://localhost:${port} in your browser.`);
+      console.log('Press Ctrl+C to stop.');
+    } catch (err: any) {
+      console.error(`❌ Failed to start dashboard server: ${err.message}`);
+    }
   });
 
 // actor command
