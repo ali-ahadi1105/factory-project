@@ -6,6 +6,8 @@ import {
   OrchestratorService,
   ReporterService,
   StageRunnerService,
+  DoctorService,
+  InitService,
 } from './engine';
 import {
   AgyAdapter,
@@ -29,6 +31,8 @@ import {
     TelegramAdapter,
     StageRunnerService,
     OrchestratorService,
+    DoctorService,
+    InitService,
   ],
   exports: [
     ConfigLoaderService,
@@ -38,6 +42,8 @@ import {
     ReporterService,
     StageRunnerService,
     OrchestratorService,
+    DoctorService,
+    InitService,
     GitHubAdapter,
     TelegramAdapter,
   ],

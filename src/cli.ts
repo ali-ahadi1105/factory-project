@@ -4,16 +4,30 @@ import { Command } from 'commander';
 import * as yaml from 'yaml';
 import { ConfigLoaderService } from './config';
 import { DatabaseService, FactoryStoreService } from './store';
-import { LineageService, OrchestratorService, ReporterService, StageRunnerService } from './engine';
+import {
+  DoctorService,
+  InitService,
+  LineageService,
+  OrchestratorService,
+  ReporterService,
+  StageRunnerService,
+} from './engine';
 import { AgyAdapter, ClaudeAdapter, GitHubAdapter, TelegramAdapter } from './adapters';
 import { WorkStatus, WorkType, WorkPriority, CanonicalUri } from './core';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 const program = new Command();
 
-function initServices() {
-  const configLoader = new ConfigLoaderService();
+function initServices(projectPath?: string) {
+  const baseDir = projectPath
+    ? fs.existsSync(projectPath) && fs.statSync(projectPath).isFile()
+      ? path.dirname(projectPath)
+      : path.resolve(projectPath)
+    : process.cwd();
+
+  const configLoader = new ConfigLoaderService(baseDir);
   const dbService = new DatabaseService();
   dbService.connect();
   const store = new FactoryStoreService(dbService);
@@ -37,23 +51,99 @@ function initServices() {
     configLoader,
     stageRunner,
   );
-  return { configLoader, dbService, store, lineage, reporter, stageRunner, orchestrator, githubAdapter, telegramAdapter };
+  const doctor = new DoctorService(configLoader, dbService);
+  const initService = new InitService(store, dbService);
+
+  return {
+    configLoader,
+    dbService,
+    store,
+    lineage,
+    reporter,
+    stageRunner,
+    orchestrator,
+    githubAdapter,
+    telegramAdapter,
+    doctor,
+    initService,
+  };
 }
 
 program
   .name('factory')
   .description('Software Factory - System of Coordination (Concept v31)')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('--project <path>', 'Custom path to project directory or factory.yaml');
+
+// doctor command
+program
+  .command('doctor')
+  .description('Run comprehensive environment, agent, gateway, and configuration diagnostics')
+  .option('--json', 'Output diagnostics as JSON')
+  .action(async (options) => {
+    const project = program.opts().project;
+    const { doctor } = initServices(project);
+    try {
+      const targetCwd = project ? path.resolve(process.cwd(), project) : process.cwd();
+      const report = await doctor.runDiagnostics({ cwd: targetCwd });
+      if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+      } else {
+        console.log(doctor.formatReport(report));
+      }
+      if (report.overallStatus === 'FAIL') {
+        process.exitCode = 1;
+      }
+    } catch (err: any) {
+      console.error(`❌ Doctor diagnostics failed: ${err.message}`);
+      process.exitCode = 1;
+    }
+  });
 
 // init command
 program
-  .command('init')
-  .description('Initialize Factory database and default actors')
-  .action(() => {
-    const { store, dbService } = initServices();
-    console.log(`✅ Factory database initialized at: ${dbService.getDbPath()}`);
-    const actors = store.listActors();
-    console.log(`📋 Registered actors: ${actors.map((a) => a.id).join(', ')}`);
+  .command('init [dir]')
+  .description('Bootstrap repository for Factory orchestration (factory.yaml, AGENTS.md, CLAUDE.md)')
+  .option('-f, --force', 'Overwrite existing configuration files', false)
+  .action(async (dir, options) => {
+    const targetDir = dir ? path.resolve(process.cwd(), dir) : process.cwd();
+    const { initService, store } = initServices(targetDir);
+    try {
+      const result = await initService.initProject(targetDir, { force: options.force });
+      console.log(`\n🚀 Software Factory Initialized in: ${result.targetDir}`);
+      console.log(`   Project Name:   ${result.projectName}`);
+      if (result.repository) {
+        console.log(`   GitHub Repo:    ${result.repository}`);
+      }
+      console.log(`   Default Branch: ${result.defaultBranch}`);
+
+      if (result.createdFiles.length > 0) {
+        console.log(`\n📄 Created files:`);
+        for (const f of result.createdFiles) {
+          console.log(`   ✅ ${f}`);
+        }
+      }
+      if (result.overwrittenFiles.length > 0) {
+        console.log(`\n🔄 Overwritten files (--force):`);
+        for (const f of result.overwrittenFiles) {
+          console.log(`   ⚠️  ${f}`);
+        }
+      }
+      if (result.skippedFiles.length > 0) {
+        console.log(`\n⏭️  Skipped existing files (use --force to overwrite):`);
+        for (const f of result.skippedFiles) {
+          console.log(`   ℹ️  ${f}`);
+        }
+      }
+      if (result.dbPath) {
+        console.log(`\n💾 Database initialized at: ${result.dbPath}`);
+      }
+      const actors = store.listActors();
+      console.log(`📋 Registered actors: ${actors.map((a) => a.id).join(', ')}`);
+    } catch (err: any) {
+      console.error(`❌ Initialization failed: ${err.message}`);
+      process.exitCode = 1;
+    }
   });
 
 // work commands
