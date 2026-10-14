@@ -57,7 +57,7 @@ export class AgyAdapter extends BaseAgentAdapter {
     };
 
     const model = actor?.config?.model || actor?.model || (work.context?.model as string);
-    const args = ['-p', promptText, '--mode=accept-edits'];
+    const args = ['-p', promptText, '--mode=accept-edits', '--dangerously-skip-permissions'];
     if (model) {
       args.push('--model', model);
     }

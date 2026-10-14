@@ -29,19 +29,42 @@ export class ConfigLoaderService {
   constructor(private readonly basePath: string = process.cwd()) {}
 
   /**
-   * Find factory.yaml or factory.yml in basePath or given directory.
+   * Find factory.yaml or factory.yml in basePath or given directory,
+   * searching upwards in parent directories by default.
    */
-  findConfigFile(searchDir?: string): string | null {
-    const dir = searchDir || this.basePath;
-    const candidates = [
-      path.join(dir, 'factory.yaml'),
-      path.join(dir, 'factory.yml'),
-    ];
+  findConfigFile(searchDir?: string, upward: boolean = true): string | null {
+    const rawTarget = searchDir || this.basePath;
+    const resolvedTarget = path.isAbsolute(rawTarget)
+      ? rawTarget
+      : path.resolve(this.basePath, rawTarget);
 
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-        return candidate;
+    // If target is directly an existing file, return it
+    if (fs.existsSync(resolvedTarget) && fs.statSync(resolvedTarget).isFile()) {
+      return resolvedTarget;
+    }
+
+    let dir = resolvedTarget;
+    while (true) {
+      const candidates = [
+        path.join(dir, 'factory.yaml'),
+        path.join(dir, 'factory.yml'),
+      ];
+
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return candidate;
+        }
       }
+
+      if (!upward) {
+        break;
+      }
+
+      const parentDir = path.dirname(dir);
+      if (parentDir === dir) {
+        break; // Reached filesystem root
+      }
+      dir = parentDir;
     }
 
     return null;
@@ -50,8 +73,8 @@ export class ConfigLoaderService {
   /**
    * Check whether a factory.yaml or factory.yml exists.
    */
-  hasConfigFile(searchDir?: string): boolean {
-    return this.findConfigFile(searchDir) !== null;
+  hasConfigFile(searchDir?: string, upward: boolean = true): boolean {
+    return this.findConfigFile(searchDir, upward) !== null;
   }
 
   /**
@@ -73,6 +96,7 @@ export class ConfigLoaderService {
 
   /**
    * Load configuration from explicit path or auto-located factory.yaml.
+   * If explicitPath points to a directory, searches for factory.yaml within it (and upwards).
    * If no file exists, returns fallback default configuration.
    */
   loadConfig(explicitPath?: string): FactoryConfig {
@@ -83,12 +107,20 @@ export class ConfigLoaderService {
         ? explicitPath
         : path.resolve(this.basePath, explicitPath);
 
-      if (!fs.existsSync(resolved)) {
+      if (fs.existsSync(resolved)) {
+        if (fs.statSync(resolved).isDirectory()) {
+          filePath = this.findConfigFile(resolved, true);
+          if (!filePath) {
+            throw new Error(`Configuration file not found in directory: ${resolved}`);
+          }
+        } else {
+          filePath = resolved;
+        }
+      } else {
         throw new Error(`Configuration file not found at: ${resolved}`);
       }
-      filePath = resolved;
     } else {
-      filePath = this.findConfigFile();
+      filePath = this.findConfigFile(this.basePath, true);
     }
 
     if (!filePath) {
@@ -124,16 +156,28 @@ export class ConfigLoaderService {
         ? explicitPath
         : path.resolve(this.basePath, explicitPath);
 
-      if (!fs.existsSync(resolved)) {
+      if (fs.existsSync(resolved)) {
+        if (fs.statSync(resolved).isDirectory()) {
+          filePath = this.findConfigFile(resolved, true);
+          if (!filePath) {
+            return {
+              valid: false,
+              errors: [`Configuration file not found in directory: ${resolved}`],
+              path: resolved,
+            };
+          }
+        } else {
+          filePath = resolved;
+        }
+      } else {
         return {
           valid: false,
           errors: [`Configuration file not found: ${resolved}`],
           path: resolved,
         };
       }
-      filePath = resolved;
     } else {
-      filePath = this.findConfigFile();
+      filePath = this.findConfigFile(this.basePath, true);
     }
 
     if (!filePath) {

@@ -254,6 +254,57 @@ actors:
       expect(() => loader.loadConfig(nonExistent)).toThrow('Configuration file not found');
     });
 
+    it('should find factory.yaml hierarchically upwards in parent directories', () => {
+      const nestedDir = path.join(tempDir, 'packages', 'service', 'src');
+      fs.mkdirSync(nestedDir, { recursive: true });
+
+      const yamlContent = `
+name: hierarchical-factory
+version: 1.5.0
+`;
+      const yamlPath = path.join(tempDir, 'factory.yaml');
+      fs.writeFileSync(yamlPath, yamlContent, 'utf-8');
+
+      const loader = new ConfigLoaderService(nestedDir);
+      expect(loader.hasConfigFile()).toBe(true);
+      expect(loader.findConfigFile()).toBe(yamlPath);
+
+      const config = loader.loadConfig();
+      expect(config.name).toBe('hierarchical-factory');
+      expect(config.version).toBe('1.5.0');
+      expect(loader.getLoadedPath()).toBe(yamlPath);
+    });
+
+    it('should load configuration when explicit path is a directory containing factory.yaml', () => {
+      const subDir = path.join(tempDir, 'subproject');
+      fs.mkdirSync(subDir, { recursive: true });
+
+      const yamlContent = `
+name: subproject-factory
+version: 3.0.0
+`;
+      fs.writeFileSync(path.join(subDir, 'factory.yaml'), yamlContent, 'utf-8');
+
+      const loader = new ConfigLoaderService(tempDir);
+      const config = loader.loadConfig(subDir);
+      expect(config.name).toBe('subproject-factory');
+      expect(config.version).toBe('3.0.0');
+
+      const val = loader.validateConfigFile(subDir);
+      expect(val.valid).toBe(true);
+      expect(val.config?.name).toBe('subproject-factory');
+    });
+
+    it('should respect upward: false option when searching', () => {
+      const nestedDir = path.join(tempDir, 'deep', 'nested');
+      fs.mkdirSync(nestedDir, { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'factory.yaml'), 'name: top\n', 'utf-8');
+
+      const loader = new ConfigLoaderService(nestedDir);
+      expect(loader.findConfigFile(nestedDir, false)).toBeNull();
+      expect(loader.findConfigFile(nestedDir, true)).toBe(path.join(tempDir, 'factory.yaml'));
+    });
+
     it('should load project root sample factory.yaml correctly', () => {
       const projectRoot = path.resolve(__dirname, '..');
       const rootLoader = new ConfigLoaderService(projectRoot);

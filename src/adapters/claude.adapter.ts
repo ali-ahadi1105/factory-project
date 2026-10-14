@@ -47,7 +47,13 @@ export class ClaudeAdapter extends BaseAgentAdapter {
     const promptText = `Task: ${work.title}\n\nContext & Requirements:\n${work.description}\n\nWork ID: ${work.id}`;
 
     const model = actor?.config?.model || actor?.model || (work.context?.model as string);
-    const args = ['-p', promptText, '--allowedTools', 'Write,Edit,Read,Bash'];
+    const args = [
+      '-p',
+      promptText,
+      '--dangerously-skip-permissions',
+      '--allowedTools',
+      'Write,Edit,Read,Bash',
+    ];
     if (model) {
       args.push('--model', model);
     }
