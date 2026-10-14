@@ -97,6 +97,19 @@ workCmd
     console.log(`✅ Work created: ${work.id}`);
   });
 
+workCmd
+  .command('triage <workId>')
+  .description('Inspect failure root causes and relations for a Work item')
+  .action((workId) => {
+    const { orchestrator } = initServices();
+    try {
+      const report = orchestrator.triage(workId);
+      console.log(orchestrator.formatTriageReport(report));
+    } catch (err: any) {
+      console.error(`❌ Triage failed: ${err.message}`);
+    }
+  });
+
 // run command
 program
   .command('run <workId>')
@@ -164,10 +177,28 @@ program
       if (result.branchName) console.log(`🌿 Git Branch: ${result.branchName}`);
       if (result.prUrl) console.log(`🔗 Pull Request: ${result.prUrl} (#${result.prNumber})`);
       console.log(`🧪 Automated Tests: ${result.testPassed ? '✅ PASSED' : '⚠️ FAILED'}`);
+      if (result.error) {
+        console.log(`\n❌ Pipeline halted without PR: ${result.error}`);
+        console.log(`🔍 Inspect root cause: factory triage ${result.workId}`);
+      }
       console.log('\n📊 Lineage Tree:');
       console.log(result.lineageTree);
     } catch (err: any) {
       console.error(`❌ Pipeline failed: ${err.message}`);
+    }
+  });
+
+// triage command
+program
+  .command('triage <workId>')
+  .description('Inspect failure root causes and relations for a work item')
+  .action((workId) => {
+    const { orchestrator } = initServices();
+    try {
+      const report = orchestrator.triage(workId);
+      console.log(orchestrator.formatTriageReport(report));
+    } catch (err: any) {
+      console.error(`❌ Triage failed: ${err.message}`);
     }
   });
 

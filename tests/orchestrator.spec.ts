@@ -51,6 +51,7 @@ describe('Factory Orchestrator Service', () => {
     jest.spyOn(githubAdapter, 'commitAll').mockResolvedValue('commit-sha');
     jest.spyOn(githubAdapter, 'pushBranch').mockResolvedValue();
     jest.spyOn(githubAdapter, 'createPullRequest').mockResolvedValue(mockPr);
+    jest.spyOn(githubAdapter, 'addIssueComment').mockResolvedValue();
 
     orchestrator = new OrchestratorService(
       store,

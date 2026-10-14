@@ -4,6 +4,7 @@ import {
   Work,
   Actor,
   Execution,
+  Relation,
   Signal,
   WorkStatus,
   WorkType,
@@ -54,6 +55,33 @@ export interface PipelineResult {
   implementationLogs: string;
   reviewLogs: string;
   lineageTree: string;
+  error?: string;
+}
+
+export interface TriageExecution {
+  id: string;
+  workId: string;
+  actorId: string;
+  status: ExecutionStatus;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+  recentLogs?: string;
+}
+
+export interface TriageReport {
+  workId: string;
+  title: string;
+  status: WorkStatus;
+  failed: boolean;
+  failedStep?: string;
+  rootCause?: string;
+  error?: string;
+  context: Record<string, any>;
+  executions: TriageExecution[];
+  relations: Relation[];
+  lineageTree: string;
+  recommendations: string[];
 }
 
 @Injectable()
@@ -473,6 +501,41 @@ export class OrchestratorService {
       }
       await notifyStepComplete('implement', implResult.status === ExecutionStatus.COMPLETED ? 'موفق' : 'دارای خطا');
 
+      // Check implementation status: if failed, halt pipeline and rollback
+      if (implResult.status !== ExecutionStatus.COMPLETED) {
+        const errorCause = implResult.error || 'Implementation failed: actor execution did not complete';
+        this.logger.error(`[Pipeline] Implementation failed. Halting pipeline: ${errorCause}`);
+
+        implWork.status = WorkStatus.FAILED;
+        implWork.context = {
+          ...implWork.context,
+          error: errorCause,
+          failureCause: errorCause,
+          failedStep: 'implement',
+        };
+        implWork.updatedAt = new Date().toISOString();
+        this.store.saveWork(implWork);
+
+        if (repo && issueNumber) {
+          await this.postFailureComment(repo, issueNumber, 'Implementation', errorCause, implResult.logs);
+        }
+
+        await notifyFailure(errorCause, 'implement');
+
+        const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
+        return {
+          workId: implWorkId,
+          issueNumber,
+          issueUrl,
+          branchName,
+          testPassed: false,
+          implementationLogs: implResult.logs,
+          reviewLogs: '',
+          lineageTree,
+          error: errorCause,
+        };
+      }
+
       // 4. Step 3: Review & Verification Work via claude
       await notifyStepStart('review', 'در حال بازبینی توسط claude');
       const reviewWorkId = crypto.randomUUID();
@@ -483,7 +546,7 @@ export class OrchestratorService {
         type: WorkType.REVIEW,
         status: WorkStatus.PENDING,
         priority: WorkPriority.HIGH,
-        context: { correlationId, implWorkId, branchName, issueNumber },
+        context: { correlationId, implWorkId, branchName, issueNumber, githubRepo: repo },
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -504,6 +567,51 @@ export class OrchestratorService {
         this.reporterService?.broadcastLog('claude', reviewResult.logs.slice(-500));
       }
       await notifyStepComplete('review', reviewResult.status === ExecutionStatus.COMPLETED ? 'تأیید شد' : 'دارای هشدار');
+
+      // Check review status: if failed, halt pipeline and rollback
+      if (reviewResult.status !== ExecutionStatus.COMPLETED) {
+        const errorCause = reviewResult.error || 'Review failed: verification rejected or reviewer did not complete';
+        this.logger.error(`[Pipeline] Review failed. Halting pipeline: ${errorCause}`);
+
+        reviewWork.status = WorkStatus.FAILED;
+        reviewWork.context = {
+          ...reviewWork.context,
+          error: errorCause,
+          failureCause: errorCause,
+          failedStep: 'review',
+        };
+        reviewWork.updatedAt = new Date().toISOString();
+        this.store.saveWork(reviewWork);
+
+        implWork.status = WorkStatus.FAILED;
+        implWork.context = {
+          ...implWork.context,
+          error: `Review failed: ${errorCause}`,
+          failureCause: `Review failed: ${errorCause}`,
+          failedStep: 'review',
+        };
+        implWork.updatedAt = new Date().toISOString();
+        this.store.saveWork(implWork);
+
+        if (repo && issueNumber) {
+          await this.postFailureComment(repo, issueNumber, 'Review & Verification', errorCause, reviewResult.logs);
+        }
+
+        await notifyFailure(errorCause, 'review');
+
+        const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
+        return {
+          workId: implWorkId,
+          issueNumber,
+          issueUrl,
+          branchName,
+          testPassed: false,
+          implementationLogs: implResult.logs,
+          reviewLogs: reviewResult.logs,
+          lineageTree,
+          error: errorCause,
+        };
+      }
 
       // 5. Step 4: Run Automated Tests
       await notifyStepStart('test', 'اجرای تست‌های خودکار');
@@ -535,6 +643,42 @@ export class OrchestratorService {
           this.reporterService?.broadcastLog('TestRunner', `خطا در اجرای تست: ${err.message}`, 'warn');
           await notifyStepComplete('test', '⚠️ دارای خطای تست');
         }
+      }
+
+      // Check test status: if automated tests failed, do not create an unverified PR
+      if (!testPassed) {
+        const errorCause = `Automated tests failed:\n${testOutput.trim()}`;
+        this.logger.error(`[Pipeline] Automated tests failed. Halting pipeline without creating PR.`);
+
+        implWork.status = WorkStatus.FAILED;
+        implWork.context = {
+          ...implWork.context,
+          error: errorCause,
+          failureCause: errorCause,
+          failedStep: 'test',
+          testOutput: testOutput.slice(-2000),
+        };
+        implWork.updatedAt = new Date().toISOString();
+        this.store.saveWork(implWork);
+
+        if (repo && issueNumber) {
+          await this.postFailureComment(repo, issueNumber, 'Automated Tests', errorCause, testOutput);
+        }
+
+        await notifyFailure('Automated tests failed', 'test');
+
+        const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
+        return {
+          workId: implWorkId,
+          issueNumber,
+          issueUrl,
+          branchName,
+          testPassed: false,
+          implementationLogs: implResult.logs,
+          reviewLogs: reviewResult.logs,
+          lineageTree,
+          error: errorCause,
+        };
       }
 
       // 6. Step 5: Git Commit, Push & Create Pull Request
@@ -610,6 +754,20 @@ ${testOutput.slice(-500)}
         } catch (err: any) {
           this.logger.error(`[Pipeline] Error during Git/PR step: ${err.message}`);
           await notifyFailure(err.message, 'pr');
+          const errorCause = `Git/PR creation failed: ${err.message}`;
+          implWork.status = WorkStatus.FAILED;
+          implWork.context = {
+            ...implWork.context,
+            error: errorCause,
+            failureCause: errorCause,
+            failedStep: 'pr',
+          };
+          implWork.updatedAt = new Date().toISOString();
+          this.store.saveWork(implWork);
+
+          if (repo && issueNumber) {
+            await this.postFailureComment(repo, issueNumber, 'Git/PR Creation', errorCause, err.message);
+          }
         }
       }
 
@@ -631,5 +789,179 @@ ${testOutput.slice(-500)}
       await notifyFailure(err.message);
       throw err;
     }
+  }
+
+  // --- FAILURE HANDLING & TRIAGE ---
+
+  async postFailureComment(
+    repo: string,
+    issueNumber: number,
+    failedStep: string,
+    errorCause: string,
+    details?: string,
+  ): Promise<void> {
+    const commentBody = `## ❌ Software Factory Pipeline Failure Report
+
+**Failed Step:** ${failedStep}
+**Status:** FAILED
+**Time:** ${new Date().toISOString()}
+
+### Error Cause:
+\`\`\`
+${errorCause.slice(0, 1000)}
+\`\`\`
+
+${
+  details
+    ? `### Execution Details / Logs:
+\`\`\`
+${details.slice(-1000)}
+\`\`\``
+    : ''
+}
+
+---
+*Factory Pipeline halted: No unverified PR was created.*
+*Inspect and triage locally using: \`factory triage <workId>\`*
+`;
+
+    try {
+      await this.githubAdapter.addIssueComment(repo, issueNumber, commentBody);
+      this.logger.log(`[Pipeline] Posted failure comment to GitHub Issue #${issueNumber}`);
+    } catch (err: any) {
+      this.logger.warn(`[Pipeline] Failed to post failure comment to GitHub Issue #${issueNumber}: ${err.message}`);
+    }
+  }
+
+  triage(workId: string): TriageReport {
+    const work = this.store.getWork(workId);
+    if (!work) {
+      throw new Error(`Work with ID ${workId} not found`);
+    }
+
+    const executions = this.store.listExecutionsForWork(workId);
+    const outgoing = this.store.getRelationsForSource(CanonicalUri.factoryWork(workId));
+    const incoming = this.store.getRelationsForTarget(CanonicalUri.factoryWork(workId));
+    const relations = [...outgoing, ...incoming];
+
+    // Check for verifying work (e.g. review work verifying this impl work)
+    const verifyingRelations = incoming.filter((r) => r.relationType === RelationType.VERIFIES);
+    const allExecutions = [...executions];
+
+    for (const rel of verifyingRelations) {
+      const match = rel.sourceRef.match(/^factory:\/\/work\/(.+)$/);
+      if (match) {
+        const reviewWorkId = match[1];
+        const reviewExecs = this.store.listExecutionsForWork(reviewWorkId);
+        allExecutions.push(...reviewExecs);
+      }
+    }
+
+    const failed = work.status === WorkStatus.FAILED;
+    const failedStep =
+      work.context?.failedStep ||
+      (executions.some((e) => e.status === ExecutionStatus.FAILED)
+        ? 'execution'
+        : undefined);
+
+    const rootCause =
+      work.context?.error ||
+      work.context?.failureCause ||
+      executions.find((e) => e.error)?.error ||
+      (failed ? 'Work marked as failed without explicit error cause' : undefined);
+
+    const recommendations: string[] = [];
+    if (failed) {
+      if (failedStep === 'test') {
+        recommendations.push('Automated tests failed. Inspect test output, fix test assertions/regressions, and run `pnpm test`.');
+      } else if (failedStep === 'implement') {
+        recommendations.push('Implementation failed. Check actor logs and consider falling back to claude or refining prompt.');
+      } else if (failedStep === 'review') {
+        recommendations.push('Code review failed. Address code quality or security findings before re-running.');
+      } else {
+        recommendations.push('Inspect error logs, resolve root cause, and retry execution.');
+      }
+      recommendations.push('Rollback verified: No unverified Pull Request was created.');
+    } else {
+      recommendations.push(`Work status is ${work.status}. No failure triage required.`);
+    }
+
+    const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(workId));
+
+    return {
+      workId: work.id,
+      title: work.title,
+      status: work.status,
+      failed,
+      failedStep,
+      rootCause,
+      error: work.context?.error,
+      context: work.context,
+      executions: allExecutions.map((e) => ({
+        id: e.id,
+        workId: e.workId,
+        actorId: e.actorId,
+        status: e.status,
+        error: e.error,
+        startedAt: e.startedAt,
+        finishedAt: e.finishedAt,
+        recentLogs: e.logs ? e.logs.slice(-300) : undefined,
+      })),
+      relations,
+      lineageTree,
+      recommendations,
+    };
+  }
+
+  formatTriageReport(report: TriageReport): string {
+    const lines: string[] = [];
+    lines.push('====================================================');
+    lines.push(`🔍 Factory Triage Report: ${report.workId}`);
+    lines.push('====================================================');
+    lines.push(`Title:       ${report.title}`);
+    lines.push(`Status:      ${report.failed ? '❌ FAILED' : '✅ ' + report.status.toUpperCase()}`);
+    if (report.failedStep) {
+      lines.push(`Failed Step: ${report.failedStep}`);
+    }
+    if (report.rootCause) {
+      lines.push(`\n🚨 Root Cause / Error:`);
+      lines.push(`${report.rootCause}`);
+    }
+    if (report.context?.testOutput) {
+      lines.push(`\n🧪 Test Failure Output:`);
+      lines.push(`${report.context.testOutput.slice(-500)}`);
+    }
+
+    lines.push(`\n⚙️ Execution Attempts (${report.executions.length}):`);
+    if (report.executions.length === 0) {
+      lines.push('  (No executions found)');
+    } else {
+      for (const e of report.executions) {
+        lines.push(`  - [${e.status.toUpperCase()}] Actor: ${e.actorId} (ID: ${e.id})`);
+        if (e.error) {
+          lines.push(`    Error: ${e.error}`);
+        }
+      }
+    }
+
+    lines.push(`\n🔗 Relations (${report.relations.length}):`);
+    if (report.relations.length === 0) {
+      lines.push('  (No relations recorded)');
+    } else {
+      for (const r of report.relations) {
+        lines.push(`  - ${r.sourceRef} ──[${r.relationType}]──► ${r.targetRef}`);
+      }
+    }
+
+    lines.push(`\n📊 Lineage Tree:`);
+    lines.push(report.lineageTree);
+
+    lines.push(`\n💡 Recommendations:`);
+    for (const rec of report.recommendations) {
+      lines.push(`  • ${rec}`);
+    }
+    lines.push('====================================================');
+
+    return lines.join('\n');
   }
 }

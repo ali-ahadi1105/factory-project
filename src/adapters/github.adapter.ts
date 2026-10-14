@@ -81,6 +81,26 @@ export class GitHubAdapter {
     };
   }
 
+  async addIssueComment(repo: string, issueNumber: number, body: string): Promise<void> {
+    const tmpBodyFile = path.join(
+      os.tmpdir(),
+      `gh_comment_${Date.now()}_${Math.random().toString(36).slice(2)}.md`,
+    );
+    const fs = await import('node:fs');
+    fs.writeFileSync(tmpBodyFile, body, 'utf-8');
+
+    try {
+      const cmd = `gh issue comment ${issueNumber} --repo "${repo}" --body-file "${tmpBodyFile}"`;
+      await execAsync(cmd);
+    } finally {
+      try {
+        if (fs.existsSync(tmpBodyFile)) {
+          fs.unlinkSync(tmpBodyFile);
+        }
+      } catch {}
+    }
+  }
+
   async listIssues(repo: string, state: 'open' | 'closed' | 'all' = 'open'): Promise<GitHubIssue[]> {
     const cmd = `gh issue list --repo "${repo}" --state ${state} --json number,title,body,url,state`;
     const { stdout } = await execAsync(cmd);
