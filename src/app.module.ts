@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigLoaderService } from './config';
 import { DatabaseService, FactoryStoreService } from './store';
 import { LineageService, OrchestratorService, ReporterService } from './engine';
 import {
@@ -11,6 +12,7 @@ import {
 
 @Module({
   providers: [
+    ConfigLoaderService,
     DatabaseService,
     FactoryStoreService,
     LineageService,
@@ -23,6 +25,7 @@ import {
     OrchestratorService,
   ],
   exports: [
+    ConfigLoaderService,
     DatabaseService,
     FactoryStoreService,
     LineageService,

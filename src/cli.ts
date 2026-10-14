@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import 'reflect-metadata';
 import { Command } from 'commander';
+import * as yaml from 'yaml';
+import { ConfigLoaderService } from './config';
 import { DatabaseService, FactoryStoreService } from './store';
 import { LineageService, OrchestratorService, ReporterService } from './engine';
 import { AgyAdapter, ClaudeAdapter, GitHubAdapter, TelegramAdapter } from './adapters';
@@ -11,6 +13,7 @@ import * as path from 'node:path';
 const program = new Command();
 
 function initServices() {
+  const configLoader = new ConfigLoaderService();
   const dbService = new DatabaseService();
   dbService.connect();
   const store = new FactoryStoreService(dbService);
@@ -28,8 +31,9 @@ function initServices() {
     githubAdapter,
     telegramAdapter,
     reporter,
+    configLoader,
   );
-  return { dbService, store, lineage, reporter, orchestrator, githubAdapter, telegramAdapter };
+  return { configLoader, dbService, store, lineage, reporter, orchestrator, githubAdapter, telegramAdapter };
 }
 
 program
@@ -301,6 +305,55 @@ program
 
     setInterval(checkPending, intervalSec * 1000);
     await checkPending();
+  });
+
+// config command
+const configCmd = program.command('config').description('Manage Factory configuration');
+
+configCmd
+  .command('validate')
+  .description('Validate factory.yaml configuration file')
+  .option('-p, --path <path>', 'Path to factory.yaml')
+  .action((options) => {
+    const { configLoader } = initServices();
+    const result = configLoader.validateConfigFile(options.path);
+    if (result.valid) {
+      const source = result.path || 'built-in fallback defaults (no factory.yaml found)';
+      console.log(`✅ Configuration is valid! Loaded from: ${source}`);
+      console.log(`   Factory: ${result.config?.name} v${result.config?.version}`);
+      console.log(`   Actors:  ${result.config?.actors.length || 0} configured`);
+      console.log(`   Stages:  ${result.config?.stages.length || 0} configured`);
+    } else {
+      console.error(`❌ Configuration validation failed!`);
+      if (result.errors && result.errors.length > 0) {
+        for (const err of result.errors) {
+          console.error(`   - ${err}`);
+        }
+      }
+      process.exitCode = 1;
+    }
+  });
+
+configCmd
+  .command('show')
+  .description('Display the active Factory configuration')
+  .option('-p, --path <path>', 'Path to factory.yaml')
+  .option('-f, --format <format>', 'Output format: yaml or json', 'yaml')
+  .action((options) => {
+    const { configLoader } = initServices();
+    try {
+      const config = options.path ? configLoader.loadConfig(options.path) : configLoader.getConfig();
+      const loadedPath = configLoader.getLoadedPath();
+      console.log(`# Source: ${loadedPath || 'Built-in Fallback Defaults'}`);
+      if (options.format.toLowerCase() === 'json') {
+        console.log(JSON.stringify(config, null, 2));
+      } else {
+        console.log(yaml.stringify(config));
+      }
+    } catch (err: any) {
+      console.error(`❌ Failed to show config: ${err.message}`);
+      process.exitCode = 1;
+    }
   });
 
 program.parse(process.argv);

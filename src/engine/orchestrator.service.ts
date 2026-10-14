@@ -25,6 +25,7 @@ import { GitHubAdapter } from '../adapters/github.adapter';
 import { TelegramAdapter, TelegramProgressSession } from '../adapters/telegram.adapter';
 import { LineageService } from './lineage.service';
 import { ReporterService } from './reporter.service';
+import { ConfigLoaderService } from '../config';
 import * as crypto from 'node:crypto';
 
 export interface PipelineOptions {
@@ -97,10 +98,11 @@ export class OrchestratorService {
     private readonly githubAdapter: GitHubAdapter,
     private readonly telegramAdapter?: TelegramAdapter,
     private readonly reporterService?: ReporterService,
+    private readonly configLoader?: ConfigLoaderService,
   ) {
     this.registerAdapter(this.agyAdapter);
     this.registerAdapter(this.claudeAdapter);
-    this.initDefaultActors();
+    this.syncConfiguredActors();
   }
 
   registerAdapter(adapter: BaseAgentAdapter) {
@@ -109,6 +111,41 @@ export class OrchestratorService {
 
   getAdapter(id: string): BaseAgentAdapter | undefined {
     return this.adapters.get(id);
+  }
+
+  syncConfiguredActors() {
+    if (this.configLoader) {
+      try {
+        const config = this.configLoader.getConfig();
+        if (config && config.actors && config.actors.length > 0) {
+          for (const actorCfg of config.actors) {
+            const existing = this.store.getActor(actorCfg.id);
+            const actor: Actor = {
+              id: actorCfg.id,
+              name: actorCfg.name,
+              type: (actorCfg.type as ActorType) || ActorType.INTERNAL_AGENT,
+              adapterType: (actorCfg.adapter as AdapterType) || AdapterType.CLI,
+              capabilities: actorCfg.capabilities || [],
+              availability: (actorCfg.availability as ActorAvailability) || ActorAvailability.AVAILABLE,
+              autonomyLevel: (actorCfg.autonomyLevel as AutonomyLevel) || AutonomyLevel.SEMI_AUTONOMOUS,
+              owner: actorCfg.owner,
+              config: {
+                ...actorCfg.config,
+                ...(actorCfg.model ? { model: actorCfg.model } : {}),
+              },
+              createdAt: existing ? existing.createdAt : new Date().toISOString(),
+            };
+            this.store.saveActor(actor);
+          }
+          this.logger.log(`Synced ${config.actors.length} actors from configuration into database.`);
+          return;
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to sync actors from configuration: ${err.message}. Falling back to default actors.`);
+      }
+    }
+
+    this.initDefaultActors();
   }
 
   private initDefaultActors() {
