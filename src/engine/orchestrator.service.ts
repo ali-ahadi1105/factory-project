@@ -524,7 +524,7 @@ export class OrchestratorService {
         implWorkId,
         chosenImplementer,
         workingDirectory,
-        chosenImplementer === 'agy' ? 60 : 600,
+        600,
       );
       if (implResult.logs) {
         this.reporterService?.broadcastLog(chosenImplementer, implResult.logs.slice(-500));
