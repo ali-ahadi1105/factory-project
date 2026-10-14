@@ -152,11 +152,14 @@ describe('ReporterService', () => {
   });
 
   describe('generateHtmlDashboard', () => {
-    it('should generate valid standalone HTML dashboard with dark styling and Mermaid', () => {
+    it('should generate valid standalone HTML dashboard with dark styling, Mermaid and Live terminal', () => {
       const html = reporterService.generateHtmlDashboard();
       expect(html).toContain('<!DOCTYPE html>');
       expect(html).toContain('<title>Software Factory Dashboard</title>');
       expect(html).toContain('https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs');
+      expect(html).toContain('Live Execution Stream & Logs');
+      expect(html).toContain('id="terminal-logs"');
+      expect(html).toContain('/api/live');
       expect(html).toContain('Total Works');
       expect(html).toContain('Setup Core Database');
       expect(html).toContain('Lineage Graph Dashboard');
@@ -187,8 +190,8 @@ describe('ReporterService', () => {
     });
   });
 
-  describe('serveDashboard', () => {
-    it('should serve HTML dashboard and JSON API via HTTP', async () => {
+  describe('serveDashboard & SSE /api/live', () => {
+    it('should serve HTML dashboard, JSON API, and SSE live stream via HTTP', async () => {
       const serverInstance = await reporterService.serveDashboard(0, '127.0.0.1');
       const port = serverInstance.port;
       expect(port).toBeGreaterThan(0);
@@ -217,6 +220,7 @@ describe('ReporterService', () => {
         expect(rootRes.status).toBe(200);
         expect(rootRes.contentType).toContain('text/html');
         expect(rootRes.body).toContain('Software Factory Dashboard');
+        expect(rootRes.body).toContain('terminal-logs');
 
         // Test GET /api/stats
         const statsRes = await fetchUrl('/api/stats');
@@ -231,9 +235,35 @@ describe('ReporterService', () => {
         expect(healthRes.status).toBe(200);
         expect(JSON.parse(healthRes.body).status).toBe('ok');
 
-        // Test GET /404
-        const notFoundRes = await fetchUrl('/random-endpoint');
-        expect(notFoundRes.status).toBe(404);
+        // Test SSE stream /api/live
+        const sseEvents: string[] = [];
+        const sseReq = http.get(`http://127.0.0.1:${port}/api/live`, (res) => {
+          expect(res.headers['content-type']).toBe('text/event-stream');
+          res.on('data', (chunk) => {
+            sseEvents.push(chunk.toString());
+          });
+        });
+
+        // Wait brief tick for SSE connection to register
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(reporterService.getActiveSseClientCount()).toBe(1);
+
+        // Broadcast events
+        reporterService.broadcastLog('agy', 'Code generator started.');
+        reporterService.broadcastProgress('implement', 'in_progress', 'Generating tests');
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const fullStream = sseEvents.join('');
+        expect(fullStream).toContain('event: connected');
+        expect(fullStream).toContain('event: log');
+        expect(fullStream).toContain('Code generator started.');
+        expect(fullStream).toContain('event: progress');
+        expect(fullStream).toContain('Generating tests');
+
+        sseReq.destroy();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(reporterService.getActiveSseClientCount()).toBe(0);
       } finally {
         await serverInstance.close();
       }

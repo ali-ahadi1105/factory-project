@@ -3,7 +3,7 @@ import 'reflect-metadata';
 import { Command } from 'commander';
 import { DatabaseService, FactoryStoreService } from './store';
 import { LineageService, OrchestratorService, ReporterService } from './engine';
-import { AgyAdapter, ClaudeAdapter, GitHubAdapter } from './adapters';
+import { AgyAdapter, ClaudeAdapter, GitHubAdapter, TelegramAdapter } from './adapters';
 import { WorkStatus, WorkType, WorkPriority, CanonicalUri } from './core';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
@@ -19,14 +19,17 @@ function initServices() {
   const agyAdapter = new AgyAdapter();
   const claudeAdapter = new ClaudeAdapter();
   const githubAdapter = new GitHubAdapter();
+  const telegramAdapter = new TelegramAdapter();
   const orchestrator = new OrchestratorService(
     store,
     lineage,
     agyAdapter,
     claudeAdapter,
     githubAdapter,
+    telegramAdapter,
+    reporter,
   );
-  return { dbService, store, lineage, reporter, orchestrator, githubAdapter };
+  return { dbService, store, lineage, reporter, orchestrator, githubAdapter, telegramAdapter };
 }
 
 program
@@ -121,15 +124,34 @@ program
   .option('-d, --desc <description>', 'Description', '')
   .option('--repo <githubRepo>', 'GitHub repo (e.g. ali-ahadi1105/factory-project)')
   .option('--dir <directory>', 'Working directory', process.cwd())
+  .option('--telegram', 'Enable live Telegram progress notifications')
+  .option('--chat-id <chatId>', 'Telegram Chat ID (defaults to TELEGRAM_CHAT_ID env)')
+  .option('--bot-token <botToken>', 'Telegram Bot Token (defaults to TELEGRAM_BOT_TOKEN env)')
   .action(async (title, options) => {
     const { orchestrator } = initServices();
     console.log(`🚀 Triggering pipeline for: "${title}"...`);
+
+    const botToken = options.botToken || process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = options.chatId || process.env.TELEGRAM_CHAT_ID;
+    const telegramNotification =
+      (options.telegram || botToken) && chatId
+        ? {
+            botToken,
+            chatId,
+          }
+        : undefined;
+
+    if (telegramNotification) {
+      console.log(`📲 Live Telegram notifications enabled for Chat ID: ${chatId}`);
+    }
+
     try {
       const result = await orchestrator.runPipeline({
         title,
         description: options.desc,
         workingDirectory: options.dir,
         githubRepo: options.repo,
+        telegramNotification,
       });
 
       console.log('\n✅ Pipeline Finished!');
