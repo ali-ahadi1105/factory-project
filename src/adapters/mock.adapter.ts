@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { BaseAgentAdapter, AgentResult } from './base.adapter';
-import { ExecutionStatus, Work, Execution, CanonicalUri } from '../core';
+import { ExecutionStatus, Work, Execution, CanonicalUri, Actor } from '../core';
 
 @Injectable()
 export class MockAgentAdapter extends BaseAgentAdapter {
@@ -10,6 +10,10 @@ export class MockAgentAdapter extends BaseAgentAdapter {
 
   public shouldFail = false;
   public customLogs = 'Mock agent execution succeeded.';
+  public lastActor?: Actor;
+  public lastModel?: string;
+  public lastWork?: Work;
+  public executedWorks: Work[] = [];
 
   constructor(customId = 'mock-agent') {
     super();
@@ -25,7 +29,13 @@ export class MockAgentAdapter extends BaseAgentAdapter {
     execution: Execution,
     workingDirectory: string,
     timeoutSeconds = 10,
+    actor?: Actor,
   ): Promise<AgentResult> {
+    this.lastActor = actor;
+    this.lastModel = actor?.config?.model || actor?.model;
+    this.lastWork = work;
+    this.executedWorks.push(work);
+
     if (this.shouldFail) {
       return {
         status: ExecutionStatus.FAILED,

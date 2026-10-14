@@ -1,4 +1,4 @@
-import { ExecutionStatus, Work, Execution } from '../core';
+import { ExecutionStatus, Work, Execution, Actor } from '../core';
 
 export interface AgentResult {
   status: ExecutionStatus;
@@ -19,5 +19,6 @@ export abstract class BaseAgentAdapter {
     execution: Execution,
     workingDirectory: string,
     timeoutSeconds?: number,
+    actor?: Actor,
   ): Promise<AgentResult>;
 }

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BaseAgentAdapter, AgentResult } from './base.adapter';
-import { ExecutionStatus, Work, Execution, CanonicalUri } from '../core';
+import { ExecutionStatus, Work, Execution, CanonicalUri, Actor } from '../core';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -33,6 +33,7 @@ export class ClaudeAdapter extends BaseAgentAdapter {
     execution: Execution,
     workingDirectory: string,
     timeoutSeconds = 600,
+    actor?: Actor,
   ): Promise<AgentResult> {
     if (!(await this.isAvailable())) {
       return {
@@ -45,11 +46,17 @@ export class ClaudeAdapter extends BaseAgentAdapter {
 
     const promptText = `Task: ${work.title}\n\nContext & Requirements:\n${work.description}\n\nWork ID: ${work.id}`;
 
+    const model = actor?.config?.model || actor?.model || (work.context?.model as string);
+    const args = ['-p', promptText, '--allowedTools', 'Write,Edit,Read,Bash'];
+    if (model) {
+      args.push('--model', model);
+    }
+
     return new Promise<AgentResult>((resolve) => {
       let output = '';
       const proc = spawn(
         this.executablePath,
-        ['-p', promptText, '--allowedTools', 'Write,Edit,Read,Bash'],
+        args,
         {
           cwd: workingDirectory,
           env: process.env,

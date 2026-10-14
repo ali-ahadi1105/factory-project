@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { BaseAgentAdapter, AgentResult } from './base.adapter';
-import { ExecutionStatus, Work, Execution, CanonicalUri } from '../core';
+import { ExecutionStatus, Work, Execution, CanonicalUri, Actor } from '../core';
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -33,6 +33,7 @@ export class AgyAdapter extends BaseAgentAdapter {
     execution: Execution,
     workingDirectory: string,
     timeoutSeconds = 300,
+    actor?: Actor,
   ): Promise<AgentResult> {
     if (!(await this.isAvailable())) {
       return {
@@ -44,7 +45,7 @@ export class AgyAdapter extends BaseAgentAdapter {
     }
 
     const promptText = `Task: ${work.title}\n\nContext & Instructions:\n${work.description}\n\nWork ID: ${work.id}`;
-    
+
     // Write prompt to a temporary file to avoid shell escaping issues
     const tmpPromptFile = path.join(os.tmpdir(), `agy_prompt_${execution.id}.txt`);
     fs.writeFileSync(tmpPromptFile, promptText, 'utf-8');
@@ -55,9 +56,15 @@ export class AgyAdapter extends BaseAgentAdapter {
       http_proxy: process.env.http_proxy || 'http://127.0.0.1:10808',
     };
 
+    const model = actor?.config?.model || actor?.model || (work.context?.model as string);
+    const args = ['-p', promptText, '--mode=accept-edits'];
+    if (model) {
+      args.push('--model', model);
+    }
+
     return new Promise<AgentResult>((resolve) => {
       let output = '';
-      const proc = spawn(this.executablePath, ['-p', promptText, '--mode=accept-edits'], {
+      const proc = spawn(this.executablePath, args, {
         cwd: workingDirectory,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],

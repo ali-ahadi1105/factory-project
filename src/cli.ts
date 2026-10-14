@@ -4,7 +4,7 @@ import { Command } from 'commander';
 import * as yaml from 'yaml';
 import { ConfigLoaderService } from './config';
 import { DatabaseService, FactoryStoreService } from './store';
-import { LineageService, OrchestratorService, ReporterService } from './engine';
+import { LineageService, OrchestratorService, ReporterService, StageRunnerService } from './engine';
 import { AgyAdapter, ClaudeAdapter, GitHubAdapter, TelegramAdapter } from './adapters';
 import { WorkStatus, WorkType, WorkPriority, CanonicalUri } from './core';
 import * as crypto from 'node:crypto';
@@ -19,8 +19,11 @@ function initServices() {
   const store = new FactoryStoreService(dbService);
   const lineage = new LineageService(store);
   const reporter = new ReporterService(store, lineage);
+  const stageRunner = new StageRunnerService(store, lineage, reporter);
   const agyAdapter = new AgyAdapter();
   const claudeAdapter = new ClaudeAdapter();
+  stageRunner.registerAdapter(agyAdapter);
+  stageRunner.registerAdapter(claudeAdapter);
   const githubAdapter = new GitHubAdapter();
   const telegramAdapter = new TelegramAdapter();
   const orchestrator = new OrchestratorService(
@@ -32,8 +35,9 @@ function initServices() {
     telegramAdapter,
     reporter,
     configLoader,
+    stageRunner,
   );
-  return { configLoader, dbService, store, lineage, reporter, orchestrator, githubAdapter, telegramAdapter };
+  return { configLoader, dbService, store, lineage, reporter, stageRunner, orchestrator, githubAdapter, telegramAdapter };
 }
 
 program
