@@ -36,6 +36,7 @@ export interface PipelineOptions {
   issueNumber?: number;
   skipTests?: boolean;
   testCommand?: string;
+  implementer?: 'agy' | 'claude';
   telegramNotification?: {
     botToken: string;
     chatId: number | string;
@@ -449,14 +450,20 @@ export class OrchestratorService {
         });
       }
 
-      this.logger.log(`[Pipeline] Step 2: Running Implementation with agy...`);
-      let implResult = await this.executeWork(implWorkId, 'agy', workingDirectory, 300);
+      const chosenImplementer = options.implementer || 'claude';
+      this.logger.log(`[Pipeline] Step 2: Running Implementation with ${chosenImplementer}...`);
+      let implResult = await this.executeWork(
+        implWorkId,
+        chosenImplementer,
+        workingDirectory,
+        chosenImplementer === 'agy' ? 60 : 300,
+      );
       if (implResult.logs) {
-        this.reporterService?.broadcastLog('agy', implResult.logs.slice(-500));
+        this.reporterService?.broadcastLog(chosenImplementer, implResult.logs.slice(-500));
       }
 
-      // Fallback to claude if agy failed or soft-denied
-      if (implResult.status !== ExecutionStatus.COMPLETED) {
+      // Fallback to claude if agy was chosen and failed or soft-denied
+      if (chosenImplementer === 'agy' && implResult.status !== ExecutionStatus.COMPLETED) {
         this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
         this.reporterService?.broadcastLog('Pipeline', 'سوییچ خودکار به claude جهت پیاده‌سازی...', 'warn');
         implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 300);

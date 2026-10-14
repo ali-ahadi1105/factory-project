@@ -120,8 +120,9 @@ program
 // pipeline command
 program
   .command('pipeline <title>')
-  .description('Run full end-to-end pipeline: agy (implement) -> claude (review) -> PR')
+  .description('Run full end-to-end pipeline: agy/claude (implement) -> claude (review) -> PR')
   .option('-d, --desc <description>', 'Description', '')
+  .option('-a, --actor <actorId>', 'Implementer actor ID (claude or agy)', 'claude')
   .option('--repo <githubRepo>', 'GitHub repo (e.g. ali-ahadi1105/factory-project)')
   .option('--dir <directory>', 'Working directory', process.cwd())
   .option('--telegram', 'Enable live Telegram progress notifications')
@@ -151,6 +152,7 @@ program
         description: options.desc,
         workingDirectory: options.dir,
         githubRepo: options.repo,
+        implementer: options.actor as any,
         telegramNotification,
       });
 
