@@ -53,6 +53,7 @@ export class ClaudeAdapter extends BaseAgentAdapter {
         {
           cwd: workingDirectory,
           env: process.env,
+          stdio: ['ignore', 'pipe', 'pipe'],
         },
       );
 

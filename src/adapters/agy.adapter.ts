@@ -60,6 +60,7 @@ export class AgyAdapter extends BaseAgentAdapter {
       const proc = spawn(this.executablePath, ['-p', promptText, '--mode=accept-edits'], {
         cwd: workingDirectory,
         env,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
 
       const timeoutTimer = setTimeout(() => {
