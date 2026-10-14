@@ -123,6 +123,7 @@ program
   .description('Run full end-to-end pipeline: agy/claude (implement) -> claude (review) -> PR')
   .option('-d, --desc <description>', 'Description', '')
   .option('-a, --actor <actorId>', 'Implementer actor ID (claude or agy)', 'claude')
+  .option('--issue <issueNumber>', 'Existing GitHub issue number')
   .option('--repo <githubRepo>', 'GitHub repo (e.g. ali-ahadi1105/factory-project)')
   .option('--dir <directory>', 'Working directory', process.cwd())
   .option('--telegram', 'Enable live Telegram progress notifications')
@@ -153,6 +154,7 @@ program
         workingDirectory: options.dir,
         githubRepo: options.repo,
         implementer: options.actor as any,
+        issueNumber: options.issue ? parseInt(options.issue, 10) : undefined,
         telegramNotification,
       });
 
