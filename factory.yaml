@@ -28,7 +28,7 @@ actors:
     name: Claude Code Agent
     type: internal_agent
     adapter: cli
-    model: ag/gemini-3.8-flash-high
+    model: ag/gemini-3.8-flash-low
     capabilities:
       - architecture
       - code_review
