@@ -32,7 +32,7 @@ export class ClaudeAdapter extends BaseAgentAdapter {
     work: Work,
     execution: Execution,
     workingDirectory: string,
-    timeoutSeconds = 300,
+    timeoutSeconds = 600,
   ): Promise<AgentResult> {
     if (!(await this.isAvailable())) {
       return {
