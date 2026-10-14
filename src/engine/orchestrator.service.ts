@@ -329,7 +329,7 @@ export class OrchestratorService {
     });
 
     // Execute via adapter
-    const result = await adapter.execute(work, execution, workingDirectory, timeoutSeconds);
+    const result = await adapter.execute(work, execution, workingDirectory, timeoutSeconds, actor);
 
     const finishedAt = new Date().toISOString();
     execution.status = result.status;
