@@ -1,0 +1,88 @@
+# Software Factory - Configuration
+# Based on Concept v31 (System of Coordination)
+
+name: software-factory
+version: 1.0.0
+description: Software Factory - System of Coordination for Humans and Agents
+repository: ali-ahadi1105/factory-project
+defaultBranch: main
+
+metadata:
+  architecture: Concept v31
+  owner: ali-ahadi1105
+
+actors:
+  - id: agy
+    name: Google Antigravity Agent
+    type: internal_agent
+    adapter: cli
+    model: gemini-3.8-flash
+    capabilities:
+      - code_generation
+      - implementation
+      - refactoring
+    availability: available
+    autonomy: semi_autonomous
+
+  - id: claude
+    name: Claude Code Agent
+    type: internal_agent
+    adapter: cli
+    model: claude-3-7-sonnet
+    capabilities:
+      - architecture
+      - code_review
+      - security_audit
+      - planning
+    availability: available
+    autonomy: semi_autonomous
+
+  - id: human:ali
+    name: Ali (Human Gate)
+    type: human
+    adapter: manual
+    capabilities:
+      - approval
+      - architecture_decision
+      - merge
+    availability: available
+    autonomy: human_only
+    owner: ali-ahadi1105
+
+policies:
+  defaultAutonomy: semi_autonomous
+  requireApproval: true
+  timeoutSeconds: 300
+  maxRetries: 1
+  autoFallback: true
+  testCommand: pnpm test
+  skipTests: false
+
+stages:
+  - name: issue
+    description: Create GitHub Issue first (System of Record)
+    required: true
+
+  - name: branch
+    description: Create isolated Git Branch
+    required: true
+
+  - name: implement
+    actor: agy
+    description: Implementation via agy with automatic fallback to claude
+    required: true
+    timeoutSeconds: 300
+
+  - name: review
+    actor: claude
+    description: Review and verification via claude
+    required: true
+    timeoutSeconds: 300
+
+  - name: test
+    description: Run automated test suite
+    required: true
+
+  - name: pr
+    description: Commit, push, and open Pull Request
+    required: true
