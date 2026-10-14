@@ -1,7 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigLoaderService } from './config';
 import { DatabaseService, FactoryStoreService } from './store';
-import { LineageService, OrchestratorService, ReporterService } from './engine';
+import {
+  LineageService,
+  OrchestratorService,
+  ReporterService,
+  StageRunnerService,
+} from './engine';
 import {
   AgyAdapter,
   ClaudeAdapter,
@@ -22,6 +27,7 @@ import {
     MockAgentAdapter,
     GitHubAdapter,
     TelegramAdapter,
+    StageRunnerService,
     OrchestratorService,
   ],
   exports: [
@@ -30,6 +36,7 @@ import {
     FactoryStoreService,
     LineageService,
     ReporterService,
+    StageRunnerService,
     OrchestratorService,
     GitHubAdapter,
     TelegramAdapter,

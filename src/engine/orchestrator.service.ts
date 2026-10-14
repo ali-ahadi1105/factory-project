@@ -25,6 +25,7 @@ import { GitHubAdapter } from '../adapters/github.adapter';
 import { TelegramAdapter, TelegramProgressSession } from '../adapters/telegram.adapter';
 import { LineageService } from './lineage.service';
 import { ReporterService } from './reporter.service';
+import { StageRunnerService } from './stage-runner.service';
 import { ConfigLoaderService } from '../config';
 import * as crypto from 'node:crypto';
 
@@ -99,6 +100,7 @@ export class OrchestratorService {
     private readonly telegramAdapter?: TelegramAdapter,
     private readonly reporterService?: ReporterService,
     private readonly configLoader?: ConfigLoaderService,
+    private readonly stageRunner?: StageRunnerService,
   ) {
     this.registerAdapter(this.agyAdapter);
     this.registerAdapter(this.claudeAdapter);
@@ -107,6 +109,7 @@ export class OrchestratorService {
 
   registerAdapter(adapter: BaseAgentAdapter) {
     this.adapters.set(adapter.id, adapter);
+    this.stageRunner?.registerAdapter(adapter);
   }
 
   getAdapter(id: string): BaseAgentAdapter | undefined {

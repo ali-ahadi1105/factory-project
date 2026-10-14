@@ -101,6 +101,7 @@ export const WorkflowStageSchema = z.object({
   actor: z.string().optional(),
   type: z.string().optional(),
   description: z.string().optional(),
+  gate: z.string().optional(),
   required: z.boolean().default(true),
   timeoutSeconds: z.number().positive().optional(),
   config: z.record(z.any()).nullish().transform((v) => v ?? {}),

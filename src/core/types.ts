@@ -41,6 +41,7 @@ export interface Actor {
   availability: ActorAvailability;
   autonomyLevel: AutonomyLevel;
   owner?: string;
+  model?: string;
   config: Record<string, any>;
   createdAt: string;
 }
