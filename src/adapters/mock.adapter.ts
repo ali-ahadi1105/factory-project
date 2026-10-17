@@ -10,10 +10,18 @@ export class MockAgentAdapter extends BaseAgentAdapter {
 
   public shouldFail = false;
   public customLogs = 'Mock agent execution succeeded.';
+  public customError = 'Mock intentional error';
+  /**
+   * Number of initial executions that should fail (typically with a transient
+   * error) before the agent starts succeeding. Useful for retry tests.
+   */
+  public failuresBeforeSuccess = 0;
   public lastActor?: Actor;
   public lastModel?: string;
   public lastWork?: Work;
   public executedWorks: Work[] = [];
+
+  private attempts = 0;
 
   constructor(customId = 'mock-agent') {
     super();
@@ -35,12 +43,22 @@ export class MockAgentAdapter extends BaseAgentAdapter {
     this.lastModel = actor?.config?.model || actor?.model;
     this.lastWork = work;
     this.executedWorks.push(work);
+    this.attempts++;
 
     if (this.shouldFail) {
       return {
         status: ExecutionStatus.FAILED,
         logs: 'Simulated failure in mock agent',
-        error: 'Mock intentional error',
+        error: this.customError,
+        producedReferences: [],
+      };
+    }
+
+    if (this.failuresBeforeSuccess > 0 && this.attempts <= this.failuresBeforeSuccess) {
+      return {
+        status: ExecutionStatus.FAILED,
+        logs: this.customLogs,
+        error: this.customError,
         producedReferences: [],
       };
     }

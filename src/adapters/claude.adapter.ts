@@ -15,9 +15,32 @@ export class ClaudeAdapter extends BaseAgentAdapter {
   private readonly logger = new Logger(ClaudeAdapter.name);
   private readonly executablePath: string;
 
+  /**
+   * Claude CLI emits this style of message when it is handed a model
+   * identifier it does not understand (e.g. a gateway-routed model id such as
+   * `ag/gemini-3.8-flash-low`). It falls back to its default model, so the
+   * warning must be surfaced cleanly and never crash the pipeline on its own.
+   */
+  private static readonly UNRECOGNIZED_MODEL_PATTERN =
+    /unrecognized model|unknown model|invalid model|model .*not (?:found|supported|available|recognized)|there'?s an issue with the selected model|falling back to (?:the )?default model/i;
+
   constructor(customPath?: string) {
     super();
     this.executablePath = customPath || path.join(os.homedir(), '.local/bin/claude');
+  }
+
+  /**
+   * Extract the first output line reporting an unrecognized/unsupported model.
+   * Returns undefined when no such warning is present.
+   */
+  static extractModelWarning(text: string): string | undefined {
+    if (!text) {
+      return undefined;
+    }
+    const match = text
+      .split(/\r?\n/)
+      .find((line) => ClaudeAdapter.UNRECOGNIZED_MODEL_PATTERN.test(line));
+    return match?.trim() || undefined;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -90,15 +113,31 @@ export class ClaudeAdapter extends BaseAgentAdapter {
 
       proc.on('close', (code) => {
         clearTimeout(timeoutTimer);
-        const status = code === 0 ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED;
         const producedReferences: string[] = [
           CanonicalUri.agentRun(this.id, execution.id),
         ];
 
+        const modelWarning = ClaudeAdapter.extractModelWarning(output);
+        const status = code === 0 ? ExecutionStatus.COMPLETED : ExecutionStatus.FAILED;
+        let error = code !== 0 ? `Process exited with code ${code}` : undefined;
+
+        if (modelWarning) {
+          if (code !== 0) {
+            // Surface a clean, actionable message instead of the raw CLI noise.
+            // The orchestrator classifies this as a non-fatal review failure.
+            error = `Claude CLI unrecognized model${model ? ` "${model}"` : ''}: ${modelWarning}`;
+            this.logger.warn(`[Claude] ${error}`);
+          } else {
+            this.logger.warn(
+              `[Claude] Proceeding despite an unrecognized model warning${model ? ` for "${model}"` : ''}: ${modelWarning}`,
+            );
+          }
+        }
+
         resolve({
           status,
           logs: output,
-          error: code !== 0 ? `Process exited with code ${code}` : undefined,
+          error,
           producedReferences,
         });
       });
