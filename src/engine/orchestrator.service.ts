@@ -630,7 +630,8 @@ export class OrchestratorService {
       });
 
       this.logger.log(`[Pipeline] Step 3: Running Review with claude...`);
-      const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, 300);
+      const reviewTimeout = (this.configLoader?.getConfig() as any)?.policies?.timeoutSeconds ? Math.max(600, (this.configLoader?.getConfig() as any)?.policies?.timeoutSeconds) : 600;
+      const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, reviewTimeout);
       if (reviewResult.logs) {
         this.reporterService?.broadcastLog('claude', reviewResult.logs.slice(-500));
       }

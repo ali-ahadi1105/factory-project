@@ -326,16 +326,22 @@ program
   .option('-f, --format <format>', 'Report format: html or markdown', 'html')
   .option('-w, --work <workId>', 'Target specific Work ID')
   .option('-o, --out <path>', 'Output file path')
+  .option('-m, --manager', 'Generate executive manager-ready report (Persian, dual calendar)')
   .action((options) => {
     const { reporter } = initServices();
     const format = options.format.toLowerCase() === 'markdown' ? 'markdown' : 'html';
+    const isManager = Boolean(options.manager);
+    const prefix = isManager ? 'executive-manager-report' : 'factory-report';
     const defaultFilename = options.work
       ? `factory-work-${options.work}.${format === 'markdown' ? 'md' : 'html'}`
-      : `factory-report.${format === 'markdown' ? 'md' : 'html'}`;
+      : `${prefix}.${format === 'markdown' ? 'md' : 'html'}`;
     const outPath = options.out || path.join(process.cwd(), 'reports', defaultFilename);
 
-    const generated = reporter.exportReport(outPath, format, { workId: options.work });
-    console.log(`✅ ${format.toUpperCase()} report generated: ${generated}`);
+    const generated = reporter.exportReport(outPath, format, {
+      workId: options.work,
+      manager: isManager,
+    });
+    console.log(`✅ ${isManager ? 'Manager ' : ''}${format.toUpperCase()} report generated: ${generated}`);
   });
 
 // dashboard command

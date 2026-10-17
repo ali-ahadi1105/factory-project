@@ -165,6 +165,31 @@ describe('ReporterService', () => {
       expect(html).toContain('Lineage Graph Dashboard');
       expect(html).toContain('badge-success');
     });
+
+    it('should expose the six executive tabs with SSE streaming, exports and print styling', () => {
+      const html = reporterService.generateHtmlDashboard();
+
+      // Six executive tabs: Overview, Deliverables, Agent Fleet, Manager Report, Live Console, Lineage
+      const tabIds = ['overview', 'deliverables', 'fleet', 'manager', 'console', 'lineage'];
+      for (const tab of tabIds) {
+        expect(html).toContain(`data-tab="${tab}"`);
+        expect(html).toContain(`id="tab-${tab}"`);
+      }
+      expect((html.match(/data-tab=/g) || []).length).toBe(6);
+      expect((html.match(/class="tab-pane/g) || []).length).toBe(6);
+
+      // Real-time SSE streaming, quick exports and print-optimized CSS
+      expect(html).toContain('/api/live');
+      expect(html).toContain('new EventSource');
+      expect(html).toContain('/report/manager.md');
+      expect(html).toContain('@media print');
+      expect(html).toContain('factoryToggleTheme');
+      expect(html).toContain('factoryPrintReport');
+
+      // Executive sample data is rendered on the Overview tab
+      expect(html).toContain('Total Works');
+      expect(html).toContain('Automation Rate');
+    });
   });
 
   describe('exportReport', () => {
@@ -267,6 +292,141 @@ describe('ReporterService', () => {
       } finally {
         await serverInstance.close();
       }
+    });
+
+    it('should serve manager report HTML, Markdown, and executive JSON endpoints', async () => {
+      const serverInstance = await reporterService.serveDashboard(0, '127.0.0.1');
+      const port = serverInstance.port;
+
+      const fetchUrl = (urlPath: string): Promise<{ status: number; contentType?: string; body: string }> => {
+        return new Promise((resolve, reject) => {
+          http
+            .get(`http://127.0.0.1:${port}${urlPath}`, (res) => {
+              let data = '';
+              res.on('data', (chunk) => (data += chunk));
+              res.on('end', () =>
+                resolve({
+                  status: res.statusCode || 0,
+                  contentType: res.headers['content-type'],
+                  body: data,
+                }),
+              );
+            })
+            .on('error', reject);
+        });
+      };
+
+      try {
+        // Test GET /dashboard alias
+        const dashRes = await fetchUrl('/dashboard');
+        expect(dashRes.status).toBe(200);
+        expect(dashRes.contentType).toContain('text/html');
+        expect(dashRes.body).toContain('Software Factory Dashboard');
+
+        // Test GET /report/manager
+        const mgrHtmlRes = await fetchUrl('/report/manager');
+        expect(mgrHtmlRes.status).toBe(200);
+        expect(mgrHtmlRes.contentType).toContain('text/html');
+        expect(mgrHtmlRes.body).toContain('گزارش مدیریتی');
+        expect(mgrHtmlRes.body).toContain('خلاصه مدیریتی');
+        expect(mgrHtmlRes.body).toContain('window.print()');
+
+        // Test GET /report/manager.md
+        const mgrMdRes = await fetchUrl('/report/manager.md');
+        expect(mgrMdRes.status).toBe(200);
+        expect(mgrMdRes.contentType).toContain('text/markdown');
+        expect(mgrMdRes.body).toContain('# گزارش مدیریتی سامانه هماهنگی کارخانه نرم‌افزار');
+        expect(mgrMdRes.body).toContain('## ۱. خلاصه مدیریتی');
+
+        // Test GET /api/executive
+        const execRes = await fetchUrl('/api/executive');
+        expect(execRes.status).toBe(200);
+        expect(execRes.contentType).toContain('application/json');
+        const execJson = JSON.parse(execRes.body);
+        expect(execJson.reportNumber).toBeDefined();
+        expect(execJson.shamsiDate).toBeDefined();
+        expect(execJson.gregorianDate).toBeDefined();
+        expect(execJson.metrics.totalWorks).toBe(2);
+        expect(Array.isArray(execJson.works)).toBe(true);
+        expect(Array.isArray(execJson.actors)).toBe(true);
+        expect(Array.isArray(execJson.qualityGates)).toBe(true);
+        expect(Array.isArray(execJson.risks)).toBe(true);
+      } finally {
+        await serverInstance.close();
+      }
+    });
+  });
+
+  describe('getExecutiveData & Manager Report generation', () => {
+    it('should aggregate complete executive data with Persian dual dates and metrics', () => {
+      const data = reporterService.getExecutiveData();
+      expect(data.reportNumber).toMatch(/^SF-EXEC-/);
+      expect(data.preparedBy).toContain('سامانه هماهنگی کارخانه نرم‌افزار');
+      expect(data.shamsiDate).toBeDefined();
+      expect(data.gregorianDate).toBeDefined();
+      expect(data.shamsiDateTime).toBeDefined();
+      expect(data.gregorianDateTime).toBeDefined();
+      expect(data.coverageWindow).toBeDefined();
+      expect(data.coverageWindow.label).toContain('از');
+      expect(data.metrics.totalWorks).toBe(2);
+      expect(data.metrics.completedWorks).toBe(1);
+      expect(data.metrics.inProgressWorks).toBe(1);
+      expect(data.automationRate).toBeGreaterThanOrEqual(0);
+      expect(data.works.length).toBe(2);
+      expect(data.actors.length).toBe(2);
+      expect(data.qualityGates.length).toBeGreaterThan(0);
+      expect(data.risks.length).toBeGreaterThan(0);
+      expect(data.nextActions.length).toBeGreaterThan(0);
+      expect(data.lineageMermaid).toContain('graph TD');
+    });
+
+    it('should generate formal Persian manager Markdown report', () => {
+      const md = reporterService.generateManagerReportMarkdown();
+      expect(md).toContain('# گزارش مدیریتی سامانه هماهنگی کارخانه نرم‌افزار');
+      expect(md).toContain('## ۱. خلاصه مدیریتی');
+      expect(md).toContain('## ۲. شاخص‌های کلیدی عملکرد');
+      expect(md).toContain('## ۳. وضعیت تحویل قابلیت‌ها و کارها');
+      expect(md).toContain('## ۴. بازبینی عملکرد ناوگان عامل‌ها');
+      expect(md).toContain('## ۵. تضمین کیفیت و دروازه‌های کنترل');
+      expect(md).toContain('## ۶. تحلیل ریسک و گلوگاه‌ها');
+      expect(md).toContain('## ۷. اقدامات بعدی و تصمیمات مدیریتی');
+      expect(md).toContain('## پیوست: نمودار علت و تبار');
+      expect(md).toContain('```mermaid');
+      expect(md).toContain('Setup Core Database');
+    });
+
+    it('should generate formal Persian manager HTML report with RTL, Vazirmatn and print styling', () => {
+      const html = reporterService.generateManagerReportHtml();
+      expect(html).toContain('<!DOCTYPE html>');
+      expect(html).toContain('dir="rtl"');
+      expect(html).toContain('lang="fa"');
+      expect(html).toContain('Vazirmatn');
+      expect(html).toContain('گزارش مدیریتی');
+      expect(html).toContain('@media print');
+      expect(html).toContain('window.print()');
+      expect(html).toContain('Setup Core Database');
+      expect(html).toContain('Lineage Graph Dashboard');
+    });
+
+    it('should export manager reports when manager option is enabled', () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'factory-mgr-test-'));
+      const htmlPath = path.join(tempDir, 'manager.html');
+      const mdPath = path.join(tempDir, 'manager.md');
+
+      const exportedHtml = reporterService.exportReport(htmlPath, 'html', { manager: true });
+      const exportedMd = reporterService.exportReport(mdPath, 'markdown', { manager: true });
+
+      expect(fs.existsSync(exportedHtml)).toBe(true);
+      expect(fs.existsSync(exportedMd)).toBe(true);
+
+      const htmlContent = fs.readFileSync(exportedHtml, 'utf-8');
+      const mdContent = fs.readFileSync(exportedMd, 'utf-8');
+
+      expect(htmlContent).toContain('گزارش مدیریتی');
+      expect(htmlContent).toContain('dir="rtl"');
+      expect(mdContent).toContain('# گزارش مدیریتی سامانه هماهنگی کارخانه نرم‌افزار');
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
     });
   });
 });
