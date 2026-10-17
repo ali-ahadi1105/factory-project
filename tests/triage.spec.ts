@@ -50,6 +50,11 @@ describe('Failure Rollback and Auto-Triage', () => {
     jest.spyOn(githubAdapter, 'createPullRequest').mockResolvedValue(mockPr);
     jest.spyOn(githubAdapter, 'addIssueComment').mockResolvedValue();
 
+    // Defense in depth: unit tests must never talk to the live Telegram API.
+    jest.spyOn(telegramAdapter, 'sendAndGetId').mockResolvedValue(9001);
+    jest.spyOn(telegramAdapter, 'editMessage').mockResolvedValue(true);
+    jest.spyOn(telegramAdapter, 'sendMessage').mockResolvedValue(true);
+
     orchestrator = new OrchestratorService(
       store,
       lineage,

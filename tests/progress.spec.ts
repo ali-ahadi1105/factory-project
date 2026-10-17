@@ -289,7 +289,7 @@ describe('Universal Multi-Channel Progress Engine', () => {
       expect(sink.getAckLatencyMs()).toBeLessThan(1000);
     });
 
-    it('throttles intermediate edits based on minEditIntervalMs but forces terminal edits', async () => {
+    it('always edits on stage transitions but coalesces intra-step progress', async () => {
       let currentTime = 1000;
       const sink = new TelegramProgressSink({
         adapter: mockAdapter,
@@ -314,35 +314,94 @@ describe('Universal Multi-Channel Progress Engine', () => {
 
       await sink.onPipelineStart({ workId: state.workId, title: state.title, leadAgent: state.leadAgent }, state);
 
-      // Rapid step starts within 100ms (< 500ms minEditIntervalMs)
+      // Entering a new stage is a lifecycle transition: it must render even when
+      // it lands inside the coalescing window.
       currentTime += 100;
       state.steps[0].status = 'in_progress';
       await sink.onStepStart({ workId: state.workId, stepKey: 'issue' }, state);
-      expect(mockAdapter.editMessage).not.toHaveBeenCalled();
-
-      // Advancing past minEditIntervalMs allows edit
-      currentTime += 600;
-      state.steps[0].status = 'in_progress';
-      state.steps[0].detail = 'in progress';
-      await sink.onStepProgress({ workId: state.workId, stepKey: 'issue', percent: 10 }, state);
       expect(mockAdapter.editMessage).toHaveBeenCalledTimes(1);
+
+      // Rapid intra-step progress within the window is coalesced (no edit yet).
+      currentTime += 50;
+      state.steps[0].detail = 'in progress a';
+      await sink.onStepProgress({ workId: state.workId, stepKey: 'issue', percent: 5 }, state);
+      currentTime += 50;
+      state.steps[0].detail = 'in progress b';
+      await sink.onStepProgress({ workId: state.workId, stepKey: 'issue', percent: 8 }, state);
+      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(1);
+
+      // Once minEditIntervalMs elapses the latest progress is flushed.
+      currentTime += 600;
+      state.percent = 12;
+      state.steps[0].detail = 'in progress c';
+      await sink.onStepProgress({ workId: state.workId, stepKey: 'issue', percent: 12 }, state);
+      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(2);
+      expect(mockAdapter.editMessage.mock.calls[1][3]).toContain('12%');
 
       // Step complete forces an edit regardless of throttle
       currentTime += 50;
       state.steps[0].status = 'completed';
       await sink.onStepComplete({ workId: state.workId, stepKey: 'issue' }, state);
-      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(2);
+      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(3);
 
       // Pipeline complete also forces an edit
       currentTime += 50;
       state.status = 'completed';
       state.prUrl = 'https://github.com/org/repo/pull/42';
       await sink.onPipelineComplete({ workId: state.workId, prUrl: state.prUrl }, state);
-      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(3);
+      expect(mockAdapter.editMessage).toHaveBeenCalledTimes(4);
 
-      const lastEditText = mockAdapter.editMessage.mock.calls[2][3];
+      const lastEditText = mockAdapter.editMessage.mock.calls[3][3];
       expect(lastEditText).toContain('Pipeline completed successfully');
       expect(lastEditText).toContain('https://github.com/org/repo/pull/42');
+    });
+
+    it('renders every pipeline stage (implement, review, test, pr) and finishes at 100% with the PR link', async () => {
+      const sink = new TelegramProgressSink({
+        adapter: mockAdapter,
+        botToken: 'bot-token',
+        chatId: 98765,
+        workId: 'work-telegram-e2e',
+        title: 'End to end pipeline',
+        leadAgent: 'opencode',
+        liveUrl: 'http://localhost:3000/live/work-telegram-e2e',
+        // No throttle so the dispatcher fan-out is deterministic.
+        minEditIntervalMs: 0,
+      });
+      const dispatcher = new ProgressDispatcherService();
+      dispatcher.registerSink(sink);
+
+      const workId = 'work-telegram-e2e';
+      await dispatcher.dispatchPipelineStart({
+        workId,
+        title: 'End to end pipeline',
+        leadAgent: 'opencode',
+        liveUrl: 'http://localhost:3000/live/work-telegram-e2e',
+      });
+
+      const stageKeys = ['issue', 'branch', 'implement', 'review', 'test', 'pr'];
+      for (const stepKey of stageKeys) {
+        await dispatcher.dispatchStepStart({ workId, stepKey, detail: `start ${stepKey}` });
+        await dispatcher.dispatchStepComplete({ workId, stepKey, detail: `done ${stepKey}` });
+      }
+
+      // Every stage transition produced an edit.
+      expect(mockAdapter.editMessage.mock.calls.length).toBe(stageKeys.length * 2);
+
+      const allRendered = mockAdapter.editMessage.mock.calls.map((call) => call[3]).join('\n');
+      expect(allRendered).toContain('پیاده‌سازی کد');
+      expect(allRendered).toContain('بازبینی و ممیزی کد');
+      expect(allRendered).toContain('اجرای تست‌های خودکار');
+      expect(allRendered).toContain('ساخت Pull Request');
+
+      const prUrl = 'https://github.com/ali-ahadi1105/factory-project/pull/27';
+      await dispatcher.dispatchPipelineComplete({ workId, prUrl, testPassed: true });
+
+      const finalMessage = mockAdapter.editMessage.mock.calls.at(-1)![3];
+      expect(finalMessage).toContain('100%');
+      expect(finalMessage).toContain('Pipeline completed successfully');
+      expect(finalMessage).toContain('View Pull Request');
+      expect(finalMessage).toContain(prUrl);
     });
   });
 });

@@ -126,7 +126,11 @@ export class TelegramProgressSink implements ProgressSink {
   }
 
   async onStepStart(_event: StepStartEvent, state: PipelineProgressState): Promise<void> {
-    await this.sync(state);
+    // Lifecycle transitions (entering a new stage: implement, review, test, pr)
+    // must always be visible, otherwise a long-running stage would leave the
+    // message stuck on the previous stage for minutes because the transition
+    // landed inside the coalescing window. Only intra-step progress is throttled.
+    await this.sync(state, { force: true });
   }
 
   async onStepProgress(_event: StepProgressEvent, state: PipelineProgressState): Promise<void> {
