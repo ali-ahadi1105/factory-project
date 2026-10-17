@@ -167,7 +167,10 @@ export class DoctorService {
     // 7. agy CLI binary
     checks.push(this.checkAgyCli());
 
-    // 8. claude CLI binary & settings
+    // 8. opencode CLI binary
+    checks.push(this.checkOpencodeCli());
+
+    // 9. claude CLI binary & settings
     checks.push(this.checkClaudeCli());
 
     // 9. factory.yaml configuration validity
@@ -536,6 +539,63 @@ export class DoctorService {
       status: 'WARN',
       message: 'agy CLI binary not found in PATH or ~/.local/bin/agy',
       fix: 'Install Google Antigravity CLI (agy) into ~/.local/bin/agy or add to PATH.',
+    };
+  }
+
+  /**
+   * Check OpenCode CLI binary
+   */
+  checkOpencodeCli(): DiagnosticCheck {
+    const homeDir = os.homedir();
+    const candidatePaths = [
+      path.join(homeDir, '.opencode', 'bin', 'opencode'),
+      path.join(homeDir, '.local', 'bin', 'opencode'),
+      '/usr/local/bin/opencode',
+      '/usr/bin/opencode',
+    ];
+
+    let foundPath: string | null = null;
+    for (const c of candidatePaths) {
+      if (fs.existsSync(c)) {
+        foundPath = c;
+        break;
+      }
+    }
+
+    if (!foundPath) {
+      try {
+        const which = this.execFn('which opencode', { stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        if (which && fs.existsSync(which)) {
+          foundPath = which;
+        }
+      } catch {}
+    }
+
+    if (foundPath) {
+      let version = '';
+      try {
+        version = this.execFn(`${foundPath} --version`, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+      } catch {}
+
+      return {
+        id: 'opencode_cli',
+        name: 'OpenCode Agent (opencode)',
+        category: 'agents',
+        status: 'OK',
+        message: `opencode CLI ready at ${foundPath}${version ? ` (${version})` : ''}`,
+        details: { path: foundPath, version },
+      };
+    }
+
+    return {
+      id: 'opencode_cli',
+      name: 'OpenCode Agent (opencode)',
+      category: 'agents',
+      status: 'WARN',
+      message: 'opencode CLI binary not found in PATH or ~/.opencode/bin/opencode',
+      fix: 'Install OpenCode CLI: npm i -g opencode-ai@latest',
     };
   }
 

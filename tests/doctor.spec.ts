@@ -33,9 +33,9 @@ describe('DoctorService', () => {
 
       expect(report.timestamp).toBeDefined();
       expect(['OK', 'WARN', 'FAIL']).toContain(report.overallStatus);
-      expect(report.checks.length).toBe(10);
-      expect(report.summary.total).toBe(10);
-      expect(report.summary.ok + report.summary.warn + report.summary.fail).toBe(10);
+      expect(report.checks.length).toBe(11);
+      expect(report.summary.total).toBe(11);
+      expect(report.summary.ok + report.summary.warn + report.summary.fail).toBe(11);
 
       // Verify category assignments
       const categories = report.checks.map((c) => c.category);
@@ -68,7 +68,7 @@ describe('DoctorService', () => {
 
       expect(formatted).toContain('Software Factory System & Environment Doctor');
       expect(formatted).toContain('Overall Status:');
-      expect(formatted).toContain('Summary: 10 total');
+      expect(formatted).toContain('Summary: 11 total');
     });
   });
 

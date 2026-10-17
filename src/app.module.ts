@@ -13,6 +13,7 @@ import {
   AgyAdapter,
   ClaudeAdapter,
   MockAgentAdapter,
+  OpencodeAdapter,
   GitHubAdapter,
   TelegramAdapter,
 } from './adapters';
@@ -27,6 +28,7 @@ import {
     AgyAdapter,
     ClaudeAdapter,
     MockAgentAdapter,
+    OpencodeAdapter,
     GitHubAdapter,
     TelegramAdapter,
     StageRunnerService,

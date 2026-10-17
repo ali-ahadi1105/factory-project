@@ -155,6 +155,16 @@ export class InitService {
 
     configObj.actors = [
       {
+        id: 'opencode',
+        name: 'OpenCode CLI Agent',
+        type: 'internal_agent',
+        adapter: 'cli',
+        model: 'opencode/deepseek-v4.1-flash-free',
+        capabilities: ['code_generation', 'implementation', 'refactoring', 'tests', 'debugging'],
+        availability: 'available',
+        autonomy: 'semi_autonomous',
+      },
+      {
         id: 'agy',
         name: 'Google Antigravity Agent',
         type: 'internal_agent',
@@ -209,8 +219,8 @@ export class InitService {
       },
       {
         name: 'implement',
-        actor: 'agy',
-        description: 'Implementation via agy with automatic fallback to claude',
+        actor: 'opencode',
+        description: 'Implementation via opencode with automatic fallback to claude',
         required: true,
         timeoutSeconds: 300,
       },
