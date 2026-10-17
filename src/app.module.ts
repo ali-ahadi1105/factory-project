@@ -8,6 +8,7 @@ import {
   StageRunnerService,
   DoctorService,
   InitService,
+  ProgressDispatcherService,
 } from './engine';
 import {
   AgyAdapter,
@@ -25,6 +26,7 @@ import {
     FactoryStoreService,
     LineageService,
     ReporterService,
+    ProgressDispatcherService,
     AgyAdapter,
     ClaudeAdapter,
     MockAgentAdapter,
@@ -46,6 +48,7 @@ import {
     OrchestratorService,
     DoctorService,
     InitService,
+    ProgressDispatcherService,
     GitHubAdapter,
     TelegramAdapter,
   ],

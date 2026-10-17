@@ -165,14 +165,18 @@ export class ReporterService {
   }
 
   /**
-   * Broadcast a log line from an actor or subsystem to live dashboard
+   * Broadcast a log line from an actor or subsystem to live dashboard.
+   *
+   * When `workId` is provided the line is scoped to a single pipeline run so
+   * that dedicated live tracking pages can filter out unrelated activity.
    */
-  broadcastLog(actor: string, message: string, level = 'info'): void {
+  broadcastLog(actor: string, message: string, level = 'info', workId?: string): void {
     this.broadcastEvent('log', {
       timestamp: new Date().toISOString(),
       actor,
       message,
       level,
+      ...(workId ? { workId } : {}),
     });
   }
 
@@ -478,7 +482,7 @@ ${mermaidGraph}
               const execs = this.store.listExecutionsForWork(w.id).length;
               return `
           <tr>
-            <td class="cell-title">${escapeHtml(w.title)}<br/><small class="text-muted">${escapeHtml(w.id)}</small></td>
+            <td class="cell-title">${escapeHtml(w.title)}<br/><small class="text-muted">${escapeHtml(w.id)}</small> <a href="/live/${encodeURIComponent(w.id)}" title="Live tracking">🔴</a></td>
             <td>${getStatusBadge(w.status)}</td>
             <td><span class="badge badge-outline">${escapeHtml(w.priority)}</span></td>
             <td><code>${escapeHtml(w.leadActor)}</code></td>
@@ -2119,6 +2123,240 @@ ${data.lineageMermaid}
   }
 
   /**
+   * Render the dedicated live tracking page for a single pipeline run.
+   *
+   * The page streams updates from the global SSE endpoint (`/api/live`),
+   * filtering `pipeline` snapshots by work id, and renders:
+   *  - a live progress bar with percentage,
+   *  - the currently active step,
+   *  - the full animated checklist,
+   *  - streaming execution logs.
+   */
+  generateLiveTrackingPage(workId: string): string {
+    const work = this.store.getWork(workId);
+    const executions = work ? this.store.listExecutionsForWork(work.id) : [];
+    const title = work?.title || 'Unknown Work';
+    const status = work?.status || 'pending';
+    const leadAgent = work?.assignedActorId || executions[0]?.actorId || '—';
+    const initialPercent = status === WorkStatus.COMPLETED ? 100 : 0;
+    const e = escapeHtml;
+
+    const checklist = LIVE_PIPELINE_STEPS.map(
+      (step) =>
+        `<li class="step" data-step="${e(step.key)}"><span class="step-icon">⬜</span> <span class="step-label">${e(
+          step.label,
+        )}</span></li>`,
+    ).join('');
+
+    const noWork = !work
+      ? `<div class="notice">کار با شناسه <code>${e(workId)}</code> در مخزن یافت نشد؛ در انتظار رویدادهای زنده…</div>`
+      : '';
+
+    return `<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Tracking — ${e(title)}</title>
+  <style>
+    :root {
+      --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #e6edf3;
+      --muted: #8b949e; --primary: #58a6ff; --success: #3fb950;
+      --warning: #d29922; --danger: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+      font-family: "Vazirmatn", -apple-system, "Segoe UI", Tahoma, sans-serif; line-height: 1.6;
+    }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; padding-bottom: 16px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+    h1 { font-size: 20px; margin: 0; }
+    .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .badge-in_progress { background: rgba(88,166,255,.15); color: var(--primary); }
+    .badge-completed { background: rgba(63,185,80,.15); color: var(--success); }
+    .badge-failed { background: rgba(248,81,73,.15); color: var(--danger); }
+    .badge-pending { background: rgba(139,148,158,.2); color: var(--muted); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 18px; }
+    .bar-track { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 22px; letter-spacing: 2px; color: var(--primary); }
+    .bar-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 13px; color: var(--muted); }
+    .bar-percent { font-size: 22px; font-weight: 700; color: var(--text); }
+    ul.checklist { list-style: none; margin: 0; padding: 0; }
+    li.step { padding: 7px 0; border-bottom: 1px dashed var(--border); font-size: 14px; }
+    li.step:last-child { border-bottom: none; }
+    li.step.done .step-icon { color: var(--success); }
+    li.step.active { color: var(--primary); font-weight: 700; }
+    li.step.failed { color: var(--danger); }
+    .active-step { font-size: 15px; }
+    .active-step .spin { color: var(--primary); }
+    .terminal { background: #05080c; border: 1px solid var(--border); border-radius: 8px; padding: 12px; height: 320px; overflow-y: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; direction: ltr; text-align: left; }
+    .log-line { margin-bottom: 4px; word-break: break-word; }
+    .log-ts { color: #8b949e; margin-right: 8px; font-size: 11px; }
+    .log-actor { color: #58a6ff; font-weight: 600; margin-right: 8px; }
+    .log-info { color: #7ee787; }
+    .log-warn { color: #f2cc60; }
+    .log-error { color: #ff7b72; }
+    code { background: rgba(110,118,129,.2); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    .notice { background: rgba(210,153,34,.12); border: 1px solid rgba(210,153,34,.4); color: var(--warning); padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px; }
+    a { color: var(--primary); }
+    @media print { .terminal { display: none; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>🔴 Live Tracking — ${e(title)}</h1>
+        <div class="meta">Work ID: <code>${e(workId)}</code> &bull; Lead agent: <code>${e(leadAgent)}</code></div>
+      </div>
+      <div>
+        <span id="status-badge" class="badge badge-${e(status)}">${e(status)}</span>
+        <a class="badge badge-pending" href="/dashboard">Dashboard</a>
+      </div>
+    </header>
+
+    ${noWork}
+
+    <div class="card">
+      <div class="bar-track" id="progress-bar">${this.renderProgressBar(initialPercent, 20)}</div>
+      <div class="bar-meta">
+        <span id="progress-count">0/${LIVE_PIPELINE_STEPS.length} steps</span>
+        <span class="bar-percent" id="progress-percent">${initialPercent}%</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="active-step"><span class="spin">⏳</span> <strong>Active step:</strong> <span id="active-step">در انتظار…</span></div>
+    </div>
+
+    <div class="card">
+      <ul class="checklist" id="checklist">${checklist}</ul>
+    </div>
+
+    <div class="card">
+      <div class="bar-meta" style="margin: 0 0 10px;">
+        <strong>📜 Streaming logs</strong>
+        <span id="stream-status" class="badge badge-pending">Connecting…</span>
+      </div>
+      <div class="terminal" id="terminal"><div class="log-line"><span class="log-ts">[--:--:--]</span> <span class="log-actor">[System]</span> <span class="log-info">Waiting for events from /api/live…</span></div></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+      var WORK_ID = ${JSON.stringify(workId)};
+      var BLOCKS = 20;
+      var terminal = document.getElementById('terminal');
+      var barEl = document.getElementById('progress-bar');
+      var percentEl = document.getElementById('progress-percent');
+      var countEl = document.getElementById('progress-count');
+      var activeEl = document.getElementById('active-step');
+      var badgeEl = document.getElementById('status-badge');
+      var streamEl = document.getElementById('stream-status');
+
+      function esc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      function bar(pct) {
+        pct = Math.max(0, Math.min(100, Math.round(pct || 0)));
+        var filled = Math.round((pct / 100) * BLOCKS);
+        return new Array(filled + 1).join('█') + new Array(BLOCKS - filled + 1).join('░');
+      }
+      function append(text, actor, level) {
+        if (!terminal) return;
+        var line = document.createElement('div');
+        line.className = 'log-line';
+        line.innerHTML = '<span class="log-ts">[' + new Date().toLocaleTimeString() + ']</span> ' +
+          '<span class="log-actor">[' + esc(actor || 'System') + ']</span> ' +
+          '<span class="log-' + (level || 'info') + '">' + esc(text) + '</span>';
+        terminal.appendChild(line);
+        terminal.scrollTop = terminal.scrollHeight;
+      }
+      function stepIcon(status) {
+        if (status === 'completed') return '✅';
+        if (status === 'in_progress') return '⏳';
+        if (status === 'failed') return '❌';
+        if (status === 'skipped') return '⏭️';
+        return '⬜';
+      }
+      function applyState(state) {
+        if (!state || state.workId !== WORK_ID) return;
+        var pct = state.status === 'completed' ? 100 : (state.percent || 0);
+        barEl.textContent = bar(pct);
+        percentEl.textContent = pct + '%';
+        badgeEl.textContent = state.status;
+        badgeEl.className = 'badge badge-' + state.status;
+        var settled = 0;
+        (state.steps || []).forEach(function (step) {
+          var li = document.querySelector('li.step[data-step="' + step.key + '"]');
+          if (li) {
+            li.className = 'step' + (step.status === 'completed' ? ' done' : '') +
+              (step.status === 'in_progress' ? ' active' : '') +
+              (step.status === 'failed' ? ' failed' : '');
+            var iconEl = li.querySelector('.step-icon');
+            if (iconEl) iconEl.textContent = stepIcon(step.status);
+            var labelEl = li.querySelector('.step-label');
+            if (labelEl) {
+              var txt = (step.label || step.key) + (step.detail ? ' (' + step.detail + ')' : '');
+              labelEl.textContent = txt;
+            }
+          }
+          if (step.status === 'completed' || step.status === 'failed' || step.status === 'skipped') settled++;
+        });
+        countEl.textContent = settled + '/' + (state.steps || []).length + ' steps';
+        var current = (state.steps || []).filter(function (s) { return s.status === 'in_progress'; })[0];
+        if (current) {
+          activeEl.textContent = current.label + (current.detail ? ' — ' + current.detail : '');
+        } else if (state.status === 'completed') {
+          activeEl.textContent = 'پایان یافت ✅';
+        } else if (state.status === 'failed') {
+          activeEl.textContent = 'خطا: ' + (state.error || 'unknown');
+        }
+      }
+      if (window.EventSource) {
+        var es = new EventSource('/api/live');
+        es.addEventListener('connected', function () {
+          if (streamEl) { streamEl.textContent = '🟢 Live'; streamEl.className = 'badge badge-completed'; }
+        });
+        es.addEventListener('pipeline', function (ev) {
+          try { applyState(JSON.parse(ev.data)); } catch (err) {}
+        });
+        es.addEventListener('progress', function (ev) {
+          try {
+            var d = JSON.parse(ev.data);
+            if (WORK_ID && d && d.workId && d.workId !== WORK_ID) return;
+            if (d && d.status !== 'failed') return;
+          } catch (err) {}
+        });
+        es.addEventListener('log', function (ev) {
+          try {
+            var d = JSON.parse(ev.data);
+            if (d && d.workId && WORK_ID && d.workId !== WORK_ID) return;
+            append(d.message, d.actor, d.level);
+          } catch (err) {}
+        });
+        es.onerror = function () {
+          if (streamEl) { streamEl.textContent = '⚠️ Disconnected'; streamEl.className = 'badge badge-failed'; }
+        };
+      } else {
+        append('EventSource not supported by this browser.', 'Warning', 'error');
+      }
+    })();
+  </script>
+</body>
+</html>`;
+  }
+
+  private renderProgressBar(percent: number, totalBlocks = 20): string {
+    const blocks = Math.max(1, Math.floor(totalBlocks));
+    const safe = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0;
+    const filled = Math.round((safe / 100) * blocks);
+    return '█'.repeat(filled) + '░'.repeat(blocks - filled);
+  }
+
+  /**
    * Start a lightweight web dashboard HTTP server with SSE support
    */
   async serveDashboard(
@@ -2203,6 +2441,16 @@ ${data.lineageMermaid}
           return;
         }
 
+        // Dedicated live tracking page for a single pipeline run
+        const liveMatch = pathname.match(/^\/live\/([^/]+)\/?$/);
+        if (liveMatch) {
+          const workId = decodeURIComponent(liveMatch[1]);
+          const html = this.generateLiveTrackingPage(workId);
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(html);
+          return;
+        }
+
         res.writeHead(404, { 'Content-Type': 'text/plain' });
         res.end('Not Found');
       });
@@ -2243,3 +2491,17 @@ function escapeHtml(str: string): string {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
 }
+
+/**
+ * Canonical pipeline checklist mirrored by the live tracking page before the
+ * first SSE snapshot arrives. Kept local to avoid a circular import with the
+ * progress engine (which depends on ReporterService).
+ */
+const LIVE_PIPELINE_STEPS: { key: string; label: string }[] = [
+  { key: 'issue', label: 'ثبت Issue در گیت‌هاب' },
+  { key: 'branch', label: 'ساخت برنچ ایزوله' },
+  { key: 'implement', label: 'پیاده‌سازی کد' },
+  { key: 'review', label: 'بازبینی و ممیزی کد' },
+  { key: 'test', label: 'اجرای تست‌های خودکار' },
+  { key: 'pr', label: 'ساخت Pull Request' },
+];
