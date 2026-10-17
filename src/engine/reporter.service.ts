@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { FactoryStoreService } from '../store';
 import { LineageService } from './lineage.service';
+import { formatShamsi, formatShamsiIso, formatGregorian, formatGregorianIso } from '../utils';
 import {
   Work,
   Execution,
@@ -1070,71 +1071,6 @@ ${data.lineageMermaid}
   // Executive data aggregation & manager-ready reporting
   // ---------------------------------------------------------------------------
 
-  /**
-   * Format a date using the Persian Solar Hijri calendar via native Intl.
-   */
-  private formatShamsi(date: Date, withTime = false): string {
-    const options: Intl.DateTimeFormatOptions = {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'long',
-    };
-    if (withTime) {
-      options.hour = '2-digit';
-      options.minute = '2-digit';
-    }
-    try {
-      return new Intl.DateTimeFormat('fa-IR-u-ca-persian', options).format(date);
-    } catch {
-      return new Intl.DateTimeFormat('fa-IR', options).format(date);
-    }
-  }
-
-  /**
-   * Format a date using the Gregorian calendar via native Intl.
-   *
-   * Uses the same (host) time zone as {@link formatShamsi} so that the Shamsi
-   * and Gregorian dates always describe the same instant and calendar day.
-   */
-  private formatGregorian(date: Date, withTime = false): string {
-    const options: Intl.DateTimeFormatOptions = {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      weekday: 'long',
-    };
-    if (withTime) {
-      options.hour = '2-digit';
-      options.minute = '2-digit';
-    }
-    return new Intl.DateTimeFormat('en-US', options).format(date);
-  }
-
-  /**
-   * Produce an ISO-like Persian calendar date (latin digits) for report numbers.
-   * Shares the host time zone with {@link formatShamsi} for consistency.
-   */
-  private shamsiIso(date: Date): string {
-    const parts = new Intl.DateTimeFormat('en-US-u-ca-persian', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).formatToParts(date);
-    const get = (type: string) => parts.find((p) => p.type === type)?.value || '00';
-    return `${get('year')}-${get('month')}-${get('day')}`;
-  }
-
-  /**
-   * ISO-like calendar date (YYYY-MM-DD) in the host time zone.
-   */
-  private localIsoDate(date: Date): string {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
   private trailingNumber(uri: string): number | undefined {
     const match = uri.match(/(\d+)(?:\?.*)?$/);
     return match ? Number(match[1]) : undefined;
@@ -1344,7 +1280,7 @@ ${data.lineageMermaid}
 
     const reportNumber =
       options?.reportNumber ||
-      `SF-EXEC-${this.shamsiIso(now).replace(/-/g, '')}-${String(metrics.totalWorks).padStart(3, '0')}`;
+      `SF-EXEC-${formatShamsiIso(now).replace(/-/g, '')}-${String(metrics.totalWorks).padStart(3, '0')}`;
 
     // Flatten executions once for actor performance and automation rate.
     const executions: Execution[] = [];
@@ -1542,21 +1478,21 @@ ${data.lineageMermaid}
         ? Math.round((agentExecutions / metrics.totalExecutions) * 100)
         : 100;
 
-    const fromShamsi = this.formatShamsi(coverageFrom);
-    const toShamsi = this.formatShamsi(coverageTo);
-    const shamsiDate = this.formatShamsi(now);
+    const fromShamsi = formatShamsi(coverageFrom);
+    const toShamsi = formatShamsi(coverageTo);
+    const shamsiDate = formatShamsi(now);
 
     return {
       generatedAt: now.toISOString(),
-      gregorianDate: this.formatGregorian(now),
+      gregorianDate: formatGregorian(now),
       shamsiDate,
-      gregorianDateTime: this.formatGregorian(now, true),
-      shamsiDateTime: this.formatShamsi(now, true),
+      gregorianDateTime: formatGregorian(now, { withTime: true }),
+      shamsiDateTime: formatShamsi(now, { withTime: true }),
       reportNumber,
       preparedBy: options?.preparedBy || 'سامانه هماهنگی کارخانه نرم‌افزار',
       coverageWindow: {
-        from: this.localIsoDate(coverageFrom),
-        to: this.localIsoDate(coverageTo),
+        from: formatGregorianIso(coverageFrom),
+        to: formatGregorianIso(coverageTo),
         fromShamsi,
         toShamsi,
         label: `از ${fromShamsi} تا ${toShamsi}`,
