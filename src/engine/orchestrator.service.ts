@@ -534,7 +534,7 @@ export class OrchestratorService {
       if (chosenImplementer === 'agy' && implResult.status !== ExecutionStatus.COMPLETED) {
         this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
         this.reporterService?.broadcastLog('Pipeline', 'سوییچ خودکار به claude جهت پیاده‌سازی...', 'warn');
-        implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 300);
+        implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 900);
         if (implResult.logs) {
           this.reporterService?.broadcastLog('claude', implResult.logs.slice(-500));
         }
