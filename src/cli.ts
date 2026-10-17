@@ -12,7 +12,13 @@ import {
   ReporterService,
   StageRunnerService,
 } from './engine';
-import { AgyAdapter, ClaudeAdapter, GitHubAdapter, TelegramAdapter } from './adapters';
+import {
+  AgyAdapter,
+  ClaudeAdapter,
+  OpencodeAdapter,
+  GitHubAdapter,
+  TelegramAdapter,
+} from './adapters';
 import { WorkStatus, WorkType, WorkPriority, CanonicalUri } from './core';
 import * as crypto from 'node:crypto';
 import * as path from 'node:path';
@@ -36,8 +42,10 @@ function initServices(projectPath?: string) {
   const stageRunner = new StageRunnerService(store, lineage, reporter);
   const agyAdapter = new AgyAdapter();
   const claudeAdapter = new ClaudeAdapter();
+  const opencodeAdapter = new OpencodeAdapter();
   stageRunner.registerAdapter(agyAdapter);
   stageRunner.registerAdapter(claudeAdapter);
+  stageRunner.registerAdapter(opencodeAdapter);
   const githubAdapter = new GitHubAdapter();
   const telegramAdapter = new TelegramAdapter();
   const orchestrator = new OrchestratorService(
@@ -50,6 +58,7 @@ function initServices(projectPath?: string) {
     reporter,
     configLoader,
     stageRunner,
+    opencodeAdapter,
   );
   const doctor = new DoctorService(configLoader, dbService);
   const initService = new InitService(store, dbService);

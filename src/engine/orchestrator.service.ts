@@ -21,6 +21,7 @@ import {
 import { BaseAgentAdapter, AgentResult } from '../adapters/base.adapter';
 import { AgyAdapter } from '../adapters/agy.adapter';
 import { ClaudeAdapter } from '../adapters/claude.adapter';
+import { OpencodeAdapter } from '../adapters/opencode.adapter';
 import { GitHubAdapter } from '../adapters/github.adapter';
 import { TelegramAdapter, TelegramProgressSession } from '../adapters/telegram.adapter';
 import { LineageService } from './lineage.service';
@@ -39,7 +40,7 @@ export interface PipelineOptions {
   issueNumber?: number;
   skipTests?: boolean;
   testCommand?: string;
-  implementer?: 'agy' | 'claude';
+  implementer?: 'opencode' | 'agy' | 'claude' | string;
   telegramNotification?: {
     botToken: string;
     chatId: number | string;
@@ -101,9 +102,13 @@ export class OrchestratorService {
     private readonly reporterService?: ReporterService,
     private readonly configLoader?: ConfigLoaderService,
     private readonly stageRunner?: StageRunnerService,
+    private readonly opencodeAdapter?: OpencodeAdapter,
   ) {
     this.registerAdapter(this.agyAdapter);
     this.registerAdapter(this.claudeAdapter);
+    if (this.opencodeAdapter) {
+      this.registerAdapter(this.opencodeAdapter);
+    }
     this.syncConfiguredActors();
   }
 
@@ -152,6 +157,21 @@ export class OrchestratorService {
   }
 
   private initDefaultActors() {
+    // Register opencode actor (primary implementer)
+    if (!this.store.getActor('opencode')) {
+      this.store.saveActor({
+        id: 'opencode',
+        name: 'OpenCode CLI Agent',
+        type: ActorType.INTERNAL_AGENT,
+        adapterType: AdapterType.CLI,
+        capabilities: ['code_generation', 'implementation', 'refactoring', 'tests', 'debugging'],
+        availability: ActorAvailability.AVAILABLE,
+        autonomyLevel: AutonomyLevel.SEMI_AUTONOMOUS,
+        config: { model: 'opencode/deepseek-v4.1-flash-free' },
+        createdAt: new Date().toISOString(),
+      });
+    }
+
     // Register agy actor
     if (!this.store.getActor('agy')) {
       this.store.saveActor({
@@ -387,7 +407,7 @@ export class OrchestratorService {
         [
           { key: 'issue', label: 'ثبت Issue در گیت‌هاب' },
           { key: 'branch', label: 'ساخت برنچ ایزوله' },
-          { key: 'implement', label: 'پیاده‌سازی کد (agy)' },
+          { key: 'implement', label: 'پیاده‌سازی کد (opencode)' },
           { key: 'review', label: 'بازبینی و ممیزی کد (claude)' },
           { key: 'test', label: 'اجرای تست‌های خودکار' },
           { key: 'pr', label: 'ساخت Pull Request' },
@@ -491,8 +511,17 @@ export class OrchestratorService {
         await notifyStepComplete('branch', branchName);
       }
 
-      // 3. Step 2: Implementation Work (agy with auto-fallback to claude)
-      await notifyStepStart('implement', 'در حال اجرا توسط agy');
+      // 3. Step 2: Implementation Work (opencode/agy with auto-fallback to claude)
+      const configImpl = (this.configLoader?.getConfig() as any)?.policies?.defaultImplementer;
+      const defaultImpl = configImpl && this.adapters.has(configImpl)
+        ? configImpl
+        : this.adapters.has('opencode')
+          ? 'opencode'
+          : this.adapters.has('agy')
+            ? 'agy'
+            : 'claude';
+      const chosenImplementer = options.implementer || defaultImpl;
+      await notifyStepStart('implement', `در حال اجرا توسط ${chosenImplementer}`);
       const implWorkId = crypto.randomUUID();
       const implWork: Work = {
         id: implWorkId,
@@ -518,7 +547,6 @@ export class OrchestratorService {
         });
       }
 
-      const chosenImplementer = options.implementer || 'claude';
       this.logger.log(`[Pipeline] Step 2: Running Implementation with ${chosenImplementer}...`);
       let implResult = await this.executeWork(
         implWorkId,
@@ -530,10 +558,10 @@ export class OrchestratorService {
         this.reporterService?.broadcastLog(chosenImplementer, implResult.logs.slice(-500));
       }
 
-      // Fallback to claude if agy was chosen and failed or soft-denied
-      if (chosenImplementer === 'agy' && implResult.status !== ExecutionStatus.COMPLETED) {
-        this.logger.warn(`[Pipeline] agy implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
-        this.reporterService?.broadcastLog('Pipeline', 'سوییچ خودکار به claude جهت پیاده‌سازی...', 'warn');
+      // Fallback to claude if implementer (opencode or agy) was chosen and failed or soft-denied
+      if (chosenImplementer !== 'claude' && implResult.status !== ExecutionStatus.COMPLETED) {
+        this.logger.warn(`[Pipeline] ${chosenImplementer} implementation returned ${implResult.status} (${implResult.error}). Automatically falling back to claude...`);
+        this.reporterService?.broadcastLog('Pipeline', `سوییچ خودکار از ${chosenImplementer} به claude جهت پیاده‌سازی...`, 'warn');
         implResult = await this.executeWork(implWorkId, 'claude', workingDirectory, 900);
         if (implResult.logs) {
           this.reporterService?.broadcastLog('claude', implResult.logs.slice(-500));
@@ -729,7 +757,7 @@ export class OrchestratorService {
         await notifyStepStart('pr', 'ارسال تغییرات و ساخت PR');
         try {
           this.logger.log(`[Pipeline] Step 5: Committing, pushing, and creating Pull Request...`);
-          const commitMsg = `feat: ${title}${issueNumber ? ` (refs #${issueNumber})` : ''}\n\nCoordinated by Software Factory.\nImplementer: ${implResult.status === ExecutionStatus.COMPLETED ? 'agy/claude' : 'claude'}\nReviewer: claude`;
+          const commitMsg = `feat: ${title}${issueNumber ? ` (refs #${issueNumber})` : ''}\n\nCoordinated by Software Factory.\nImplementer: ${implResult.status === ExecutionStatus.COMPLETED ? chosenImplementer : 'claude'}\nReviewer: claude`;
           await this.githubAdapter.commitAll(workingDirectory, commitMsg);
           await this.githubAdapter.pushBranch(workingDirectory, branchName);
 

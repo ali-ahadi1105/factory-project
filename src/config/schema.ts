@@ -87,7 +87,7 @@ export const PolicyConfigSchema = z.object({
   autoFallback: z.boolean().default(true),
   testCommand: z.string().optional(),
   skipTests: z.boolean().default(false),
-  defaultImplementer: z.string().default('agy'),
+  defaultImplementer: z.string().default('opencode'),
   defaultReviewer: z.string().default('claude'),
   customPolicies: z.record(z.any()).nullish().transform((v) => v ?? {}),
 });
