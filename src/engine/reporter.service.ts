@@ -1089,6 +1089,9 @@ ${data.lineageMermaid}
 
   /**
    * Format a date using the Gregorian calendar via native Intl.
+   *
+   * Uses the same (host) time zone as {@link formatShamsi} so that the Shamsi
+   * and Gregorian dates always describe the same instant and calendar day.
    */
   private formatGregorian(date: Date, withTime = false): string {
     const options: Intl.DateTimeFormatOptions = {
@@ -1096,39 +1099,36 @@ ${data.lineageMermaid}
       month: 'long',
       day: 'numeric',
       weekday: 'long',
-      timeZone: 'UTC',
     };
     if (withTime) {
       options.hour = '2-digit';
       options.minute = '2-digit';
-      options.timeZoneName = 'short';
     }
     return new Intl.DateTimeFormat('en-US', options).format(date);
   }
 
   /**
    * Produce an ISO-like Persian calendar date (latin digits) for report numbers.
+   * Shares the host time zone with {@link formatShamsi} for consistency.
    */
   private shamsiIso(date: Date): string {
     const parts = new Intl.DateTimeFormat('en-US-u-ca-persian', {
       year: 'numeric',
       month: '2-digit',
       day: '2-digit',
-      timeZone: 'UTC',
     }).formatToParts(date);
     const get = (type: string) => parts.find((p) => p.type === type)?.value || '00';
     return `${get('year')}-${get('month')}-${get('day')}`;
   }
 
   /**
-   * Convert Persian/Arabic digits in a string to latin digits.
+   * ISO-like calendar date (YYYY-MM-DD) in the host time zone.
    */
-  private toLatinDigits(value: string): string {
-    const persian = '۰۱۲۳۴۵۶۷۸۹';
-    const arabic = '٠١٢٣٤٥٦٧٨٩';
-    return value
-      .replace(/[۰-۹]/g, (d) => String(persian.indexOf(d)))
-      .replace(/[٠-٩]/g, (d) => String(arabic.indexOf(d)));
+  private localIsoDate(date: Date): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
   }
 
   private trailingNumber(uri: string): number | undefined {
@@ -1551,8 +1551,8 @@ ${data.lineageMermaid}
       reportNumber,
       preparedBy: options?.preparedBy || 'سامانه هماهنگی کارخانه نرم‌افزار',
       coverageWindow: {
-        from: coverageFrom.toISOString().slice(0, 10),
-        to: coverageTo.toISOString().slice(0, 10),
+        from: this.localIsoDate(coverageFrom),
+        to: this.localIsoDate(coverageTo),
         fromShamsi,
         toShamsi,
         label: `از ${fromShamsi} تا ${toShamsi}`,
