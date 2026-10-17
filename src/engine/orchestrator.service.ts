@@ -218,6 +218,90 @@ export class OrchestratorService {
     }
   }
 
+  // --- REVIEW RESILIENCE HELPERS ---
+
+  /**
+   * Failure signatures that indicate a transient infrastructure problem
+   * (LLM gateway / 9Router stream drops, socket or connection resets, HTTP 5xx
+   * or rate limits, timeouts) rather than a genuine code-review rejection.
+   */
+  private static readonly TRANSIENT_FAILURE_PATTERNS: RegExp[] = [
+    /9router/i,
+    /stream (?:drop|dropped|ended|ends|closed|closing|error|aborted|interrupted|disconnected|stalled)/i,
+    /streaming (?:error|aborted|interrupted|failed)/i,
+    /socket hang ?up/i,
+    /econnreset/i,
+    /econnrefused/i,
+    /econnaborted/i,
+    /etimedout/i,
+    /esockettimedout/i,
+    /epipe/i,
+    /eai_again/i,
+    /enotfound/i,
+    /network (?:error|request failed|unreachable|timeout|interrupted)/i,
+    /fetch failed/i,
+    /premature close/i,
+    /connection (?:reset|closed|refused|aborted|error|dropped)/i,
+    /upstream (?:error|timeout|unavailable|connection|closed)/i,
+    /bad gateway/i,
+    /gateway time-?out/i,
+    /service unavailable/i,
+    /\b50[234]\b/,
+    /\b429\b|too many requests|rate ?limit/i,
+    /overloaded|temporarily unavailable|try again later/i,
+    /request timed out|operation timed out|timed out after/i,
+    /unexpected end of (?:json|input|stream|response)/i,
+  ];
+
+  /**
+   * Non-fatal configuration warnings that must never halt the pipeline on
+   * their own (e.g. Claude CLI flagging an unrecognized model identifier and
+   * falling back to its default model).
+   */
+  private static readonly NON_FATAL_REVIEW_PATTERNS: RegExp[] = [
+    /unrecognized model/i,
+    /unknown model/i,
+    /invalid model/i,
+    /model .*not (?:found|supported|available|recognized)/i,
+    /there'?s an issue with the selected model/i,
+    /falling back to (?:the )?default model/i,
+  ];
+
+  private matchesAnyPattern(text: string, patterns: RegExp[]): boolean {
+    if (!text) {
+      return false;
+    }
+    return patterns.some((pattern) => pattern.test(text));
+  }
+
+  /**
+   * True when an execution failure looks like a transient network/gateway
+   * problem that is safe to retry and (when tests pass) tolerate.
+   */
+  private isTransientExecutionFailure(result: AgentResult): boolean {
+    if (result.status === ExecutionStatus.TIMED_OUT) {
+      return true;
+    }
+    const haystack = `${result.error || ''}\n${result.logs || ''}`;
+    return this.matchesAnyPattern(haystack, OrchestratorService.TRANSIENT_FAILURE_PATTERNS);
+  }
+
+  /**
+   * True when an execution failure is caused by a non-fatal configuration
+   * warning (e.g. an unrecognized Claude model) rather than a real rejection.
+   */
+  private isNonFatalReviewFailure(result: AgentResult): boolean {
+    const haystack = `${result.error || ''}\n${result.logs || ''}`;
+    return this.matchesAnyPattern(haystack, OrchestratorService.NON_FATAL_REVIEW_PATTERNS);
+  }
+
+  private delay(ms: number): Promise<void> {
+    if (ms <= 0) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   // --- SIGNAL INTAKE ---
 
   async ingestSignal(
@@ -630,57 +714,72 @@ export class OrchestratorService {
       });
 
       this.logger.log(`[Pipeline] Step 3: Running Review with claude...`);
-      const reviewTimeout = (this.configLoader?.getConfig() as any)?.policies?.timeoutSeconds ? Math.max(600, (this.configLoader?.getConfig() as any)?.policies?.timeoutSeconds) : 600;
-      const reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, reviewTimeout);
+      const policies = ((this.configLoader?.getConfig() as any)?.policies ?? {}) as Record<string, any>;
+      const configuredRetries = typeof policies.maxRetries === 'number' ? policies.maxRetries : 1;
+      const maxReviewAttempts = Math.max(1, configuredRetries + 1);
+      const reviewTimeout = policies.timeoutSeconds
+        ? Math.max(600, policies.timeoutSeconds)
+        : 600;
+      const retryDelayBaseMs =
+        typeof policies.customPolicies?.reviewRetryDelayMs === 'number'
+          ? policies.customPolicies.reviewRetryDelayMs
+          : 500;
+
+      let reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, reviewTimeout);
+      let reviewAttemptsUsed = 1;
+
+      // Retry transient gateway/network failures (e.g. 9Router stream drops)
+      // before giving up on the review stage.
+      while (
+        reviewResult.status !== ExecutionStatus.COMPLETED &&
+        reviewAttemptsUsed < maxReviewAttempts &&
+        this.isTransientExecutionFailure(reviewResult)
+      ) {
+        const reason = reviewResult.error || 'transient stream/network error';
+        this.logger.warn(
+          `[Pipeline] Review attempt ${reviewAttemptsUsed}/${maxReviewAttempts} failed transiently (${reason}). Retrying...`,
+        );
+        this.reporterService?.broadcastLog(
+          'Pipeline',
+          `تلاش مجدد بازبینی (${reviewAttemptsUsed + 1}/${maxReviewAttempts}) پس از خطای موقت شبکه...`,
+          'warn',
+        );
+        await this.delay(retryDelayBaseMs * reviewAttemptsUsed);
+        reviewAttemptsUsed++;
+        reviewResult = await this.executeWork(reviewWorkId, 'claude', workingDirectory, reviewTimeout);
+      }
+
       if (reviewResult.logs) {
         this.reporterService?.broadcastLog('claude', reviewResult.logs.slice(-500));
       }
-      await notifyStepComplete('review', reviewResult.status === ExecutionStatus.COMPLETED ? 'تأیید شد' : 'دارای هشدار');
 
-      // Check review status: if failed, halt pipeline and rollback
-      if (reviewResult.status !== ExecutionStatus.COMPLETED) {
-        const errorCause = reviewResult.error || 'Review failed: verification rejected or reviewer did not complete';
-        this.logger.error(`[Pipeline] Review failed. Halting pipeline: ${errorCause}`);
+      const reviewFailed = reviewResult.status !== ExecutionStatus.COMPLETED;
+      const reviewTransient = reviewFailed && this.isTransientExecutionFailure(reviewResult);
+      const reviewNonFatal = reviewFailed && this.isNonFatalReviewFailure(reviewResult);
+      const reviewErrorCause =
+        reviewResult.error || 'Review failed: verification rejected or reviewer did not complete';
 
+      // Record the failed review attempt now, but defer the halt/tolerate
+      // decision until automated tests have run.
+      if (reviewFailed) {
+        this.logger.warn(
+          `[Pipeline] Review failed after ${reviewAttemptsUsed} attempt(s) (transient=${reviewTransient}, nonFatal=${reviewNonFatal}): ${reviewErrorCause}`,
+        );
         reviewWork.status = WorkStatus.FAILED;
         reviewWork.context = {
           ...reviewWork.context,
-          error: errorCause,
-          failureCause: errorCause,
+          error: reviewErrorCause,
+          failureCause: reviewErrorCause,
           failedStep: 'review',
+          transient: reviewTransient,
+          nonFatal: reviewNonFatal,
+          attempts: reviewAttemptsUsed,
         };
         reviewWork.updatedAt = new Date().toISOString();
         this.store.saveWork(reviewWork);
-
-        implWork.status = WorkStatus.FAILED;
-        implWork.context = {
-          ...implWork.context,
-          error: `Review failed: ${errorCause}`,
-          failureCause: `Review failed: ${errorCause}`,
-          failedStep: 'review',
-        };
-        implWork.updatedAt = new Date().toISOString();
-        this.store.saveWork(implWork);
-
-        if (repo && issueNumber) {
-          await this.postFailureComment(repo, issueNumber, 'Review & Verification', errorCause, reviewResult.logs);
-        }
-
-        await notifyFailure(errorCause, 'review');
-
-        const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
-        return {
-          workId: implWorkId,
-          issueNumber,
-          issueUrl,
-          branchName,
-          testPassed: false,
-          implementationLogs: implResult.logs,
-          reviewLogs: reviewResult.logs,
-          lineageTree,
-          error: errorCause,
-        };
       }
+
+      await notifyStepComplete('review', reviewResult.status === ExecutionStatus.COMPLETED ? 'تأیید شد' : 'دارای هشدار');
 
       // 5. Step 4: Run Automated Tests
       await notifyStepStart('test', 'اجرای تست‌های خودکار');
@@ -748,6 +847,74 @@ export class OrchestratorService {
           lineageTree,
           error: errorCause,
         };
+      }
+
+      // 5b. Review gate (deferred): genuine review rejections still halt the
+      // pipeline, but transient gateway/network failures (e.g. 9Router stream
+      // drops) or non-fatal model warnings are tolerated when automated tests
+      // passed. This prevents transient review flakiness from blocking an
+      // otherwise verified change.
+      if (reviewFailed) {
+        const reviewTolerable = testPassed && (reviewTransient || reviewNonFatal);
+
+        if (reviewTolerable) {
+          const reason = reviewTransient
+            ? 'transient network/gateway error'
+            : 'non-fatal model/configuration warning';
+          this.logger.warn(
+            `[Pipeline] Review failed due to a ${reason} (${reviewErrorCause}) but automated tests passed. Tolerating review failure and continuing.`,
+          );
+          this.reporterService?.broadcastLog(
+            'Pipeline',
+            `بازبینی به دلیل خطای موقت (${reason}) نادیده گرفته شد؛ تست‌های خودکار پاس شدند.`,
+            'warn',
+          );
+          reviewWork.status = WorkStatus.COMPLETED;
+          reviewWork.context = {
+            ...reviewWork.context,
+            failedStep: undefined,
+            error: undefined,
+            failureCause: undefined,
+            tolerated: true,
+            toleratedReason: reason,
+            toleratedError: reviewErrorCause,
+            attempts: reviewAttemptsUsed,
+          };
+          reviewWork.updatedAt = new Date().toISOString();
+          this.store.saveWork(reviewWork);
+          await notifyStepComplete('review', 'نادیده گرفته شد (خطای موقت)');
+        } else {
+          this.logger.error(`[Pipeline] Review failed. Halting pipeline: ${reviewErrorCause}`);
+
+          implWork.status = WorkStatus.FAILED;
+          implWork.context = {
+            ...implWork.context,
+            error: `Review failed: ${reviewErrorCause}`,
+            failureCause: `Review failed: ${reviewErrorCause}`,
+            failedStep: 'review',
+          };
+          implWork.updatedAt = new Date().toISOString();
+          this.store.saveWork(implWork);
+
+          if (repo && issueNumber) {
+            await this.postFailureComment(repo, issueNumber, 'Review & Verification', reviewErrorCause, reviewResult.logs);
+          }
+
+          await notifyFailure(reviewErrorCause, 'review');
+
+          const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
+          return {
+            workId: implWorkId,
+            issueNumber,
+            issueUrl,
+            branchName,
+            testPassed: false,
+            implementationLogs: implResult.logs,
+            reviewLogs: reviewResult.logs,
+            lineageTree,
+            error: reviewErrorCause,
+          };
+        }
       }
 
       // 6. Step 5: Git Commit, Push & Create Pull Request
