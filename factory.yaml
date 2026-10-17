@@ -16,7 +16,7 @@ actors:
     name: Google Antigravity Agent
     type: internal_agent
     adapter: cli
-    model: gemini-3.8-flash
+    model: gemini-3.8-flash-high
     capabilities:
       - code_generation
       - implementation
