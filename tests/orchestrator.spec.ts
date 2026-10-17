@@ -53,6 +53,12 @@ describe('Factory Orchestrator Service', () => {
     jest.spyOn(githubAdapter, 'createPullRequest').mockResolvedValue(mockPr);
     jest.spyOn(githubAdapter, 'addIssueComment').mockResolvedValue();
 
+    // Defense in depth: never let a unit test reach the live Telegram API, even
+    // if the shell environment happens to export real bot credentials.
+    jest.spyOn(telegramAdapter, 'sendAndGetId').mockResolvedValue(9001);
+    jest.spyOn(telegramAdapter, 'editMessage').mockResolvedValue(true);
+    jest.spyOn(telegramAdapter, 'sendMessage').mockResolvedValue(true);
+
     orchestrator = new OrchestratorService(
       store,
       lineage,
@@ -168,6 +174,22 @@ describe('Factory Orchestrator Service', () => {
     expect(broadcastSpy).toHaveBeenCalledWith('review', 'in_progress', expect.any(String));
     expect(broadcastSpy).toHaveBeenCalledWith('review', 'completed', expect.any(String));
     expect(logSpy).toHaveBeenCalled();
+  });
+
+  it('does not contact Telegram when no notification target is configured (unit test isolation)', async () => {
+    const sendSpy = jest.spyOn(telegramAdapter, 'sendAndGetId');
+    const editSpy = jest.spyOn(telegramAdapter, 'editMessage');
+
+    await orchestrator.runPipeline({
+      title: 'Isolated pipeline run',
+      description: 'Must never reach the live Telegram chat',
+      workingDirectory: process.cwd(),
+      githubRepo: 'fake/repo',
+      skipTests: true,
+    });
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(editSpy).not.toHaveBeenCalled();
   });
 
   describe('Review Stage Resilience', () => {
