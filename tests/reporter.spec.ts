@@ -260,6 +260,14 @@ describe('ReporterService', () => {
         expect(healthRes.status).toBe(200);
         expect(JSON.parse(healthRes.body).status).toBe('ok');
 
+        // Test GET /live/:workId
+        const liveRes = await fetchUrl('/live/work-1');
+        expect(liveRes.status).toBe(200);
+        expect(liveRes.contentType).toContain('text/html');
+        expect(liveRes.body).toContain('Live Tracking');
+        expect(liveRes.body).toContain('work-1');
+        expect(liveRes.body).toContain('Setup Core Database');
+
         // Test SSE stream /api/live
         const sseEvents: string[] = [];
         const sseReq = http.get(`http://127.0.0.1:${port}/api/live`, (res) => {

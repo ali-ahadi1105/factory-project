@@ -23,9 +23,11 @@ import { AgyAdapter } from '../adapters/agy.adapter';
 import { ClaudeAdapter } from '../adapters/claude.adapter';
 import { OpencodeAdapter } from '../adapters/opencode.adapter';
 import { GitHubAdapter } from '../adapters/github.adapter';
-import { TelegramAdapter, TelegramProgressSession } from '../adapters/telegram.adapter';
+import { TelegramAdapter } from '../adapters/telegram.adapter';
+import { TelegramProgressSink } from '../adapters/telegram-progress.sink';
 import { LineageService } from './lineage.service';
 import { ReporterService } from './reporter.service';
+import { DEFAULT_PIPELINE_STEPS, ProgressDispatcherService } from './progress.service';
 import { StageRunnerService } from './stage-runner.service';
 import { ConfigLoaderService } from '../config';
 import * as crypto from 'node:crypto';
@@ -41,6 +43,8 @@ export interface PipelineOptions {
   skipTests?: boolean;
   testCommand?: string;
   implementer?: 'opencode' | 'agy' | 'claude' | string;
+  /** Base URL used to build the live web tracking link (defaults to localhost:3000). */
+  liveBaseUrl?: string;
   telegramNotification?: {
     botToken: string;
     chatId: number | string;
@@ -91,6 +95,7 @@ export interface TriageReport {
 export class OrchestratorService {
   private readonly logger = new Logger(OrchestratorService.name);
   private readonly adapters = new Map<string, BaseAgentAdapter>();
+  private readonly progress: ProgressDispatcherService;
 
   constructor(
     private readonly store: FactoryStoreService,
@@ -103,7 +108,9 @@ export class OrchestratorService {
     private readonly configLoader?: ConfigLoaderService,
     private readonly stageRunner?: StageRunnerService,
     private readonly opencodeAdapter?: OpencodeAdapter,
+    progressDispatcher?: ProgressDispatcherService,
   ) {
+    this.progress = progressDispatcher ?? new ProgressDispatcherService(this.reporterService);
     this.registerAdapter(this.agyAdapter);
     this.registerAdapter(this.claudeAdapter);
     if (this.opencodeAdapter) {
@@ -478,60 +485,94 @@ export class OrchestratorService {
     const correlationId = options.correlationId || crypto.randomUUID();
     const now = new Date().toISOString();
 
-    // Setup Telegram live notification session if configured
+    // Stable work id for the whole run, known before the first step so that the
+    // immediate acknowledgement can already advertise the live tracking URL.
+    const pipelineWorkId = crypto.randomUUID();
+    const liveBaseUrl =
+      options.liveBaseUrl ||
+      process.env.FACTORY_LIVE_BASE_URL ||
+      process.env.FACTORY_DASHBOARD_URL ||
+      'http://localhost:3000';
+    const liveUrl = `${liveBaseUrl.replace(/\/+$/, '')}/live/${pipelineWorkId}`;
+
+    // Resolve the lead (implementation) agent up-front so the acknowledgement
+    // can name it before any step has started.
+    const configImpl = (this.configLoader?.getConfig() as any)?.policies?.defaultImplementer;
+    const defaultImpl =
+      configImpl && this.adapters.has(configImpl)
+        ? configImpl
+        : this.adapters.has('opencode')
+          ? 'opencode'
+          : this.adapters.has('agy')
+            ? 'agy'
+            : 'claude';
+    const chosenImplementer = options.implementer || defaultImpl;
+
+    // Setup Telegram live notification channel if configured.
     const botToken = options.telegramNotification?.botToken || process.env.TELEGRAM_BOT_TOKEN;
     const chatId = options.telegramNotification?.chatId || process.env.TELEGRAM_CHAT_ID;
 
-    let telegramSession: TelegramProgressSession | null = null;
+    let telegramSink: TelegramProgressSink | null = null;
     if (this.telegramAdapter && botToken && chatId) {
-      telegramSession = this.telegramAdapter.createProgressSession(
+      telegramSink = new TelegramProgressSink({
+        adapter: this.telegramAdapter,
         botToken,
         chatId,
+        workId: pipelineWorkId,
         title,
-        [
-          { key: 'issue', label: 'ثبت Issue در گیت‌هاب' },
-          { key: 'branch', label: 'ساخت برنچ ایزوله' },
-          { key: 'implement', label: 'پیاده‌سازی کد (opencode)' },
-          { key: 'review', label: 'بازبینی و ممیزی کد (claude)' },
-          { key: 'test', label: 'اجرای تست‌های خودکار' },
-          { key: 'pr', label: 'ساخت Pull Request' },
-        ],
-      );
-      try {
-        await telegramSession.start();
-      } catch (err: any) {
-        this.logger.warn(`[Pipeline] Failed to start Telegram progress message: ${err.message}`);
-      }
+        leadAgent: chosenImplementer,
+        liveUrl,
+      });
+      this.progress.registerSink(telegramSink);
+    }
+
+    // Immediate acknowledgement (<1s): announces Work ID, title, lead agent and
+    // the live web URL to every registered channel before step 1 begins.
+    try {
+      await this.progress.dispatchPipelineStart({
+        workId: pipelineWorkId,
+        title,
+        leadAgent: chosenImplementer,
+        liveUrl,
+        steps: DEFAULT_PIPELINE_STEPS,
+      });
+    } catch (err: any) {
+      this.logger.warn(`[Pipeline] Failed to dispatch pipeline start: ${err.message}`);
     }
 
     const notifyStepStart = async (stepKey: string, detail?: string) => {
-      this.reporterService?.broadcastProgress(stepKey, 'in_progress', detail);
-      this.reporterService?.broadcastLog('Pipeline', `Starting ${stepKey}... ${detail ? `(${detail})` : ''}`);
-      if (telegramSession) {
-        try {
-          await telegramSession.setStepInProgress(stepKey, detail);
-        } catch {}
-      }
+      await this.progress.dispatchStepStart({ workId: pipelineWorkId, stepKey, detail });
     };
 
     const notifyStepComplete = async (stepKey: string, detail?: string) => {
-      this.reporterService?.broadcastProgress(stepKey, 'completed', detail);
-      this.reporterService?.broadcastLog('Pipeline', `Completed ${stepKey}. ${detail ? `(${detail})` : ''}`);
-      if (telegramSession) {
-        try {
-          await telegramSession.completeStep(stepKey, detail);
-        } catch {}
-      }
+      await this.progress.dispatchStepComplete({ workId: pipelineWorkId, stepKey, detail });
+    };
+
+    const notifyStepFailure = async (stepKey: string, error: string) => {
+      await this.progress.dispatchStepComplete({
+        workId: pipelineWorkId,
+        stepKey,
+        detail: error,
+        status: 'failed',
+      });
     };
 
     const notifyFailure = async (error: string, failedKey?: string) => {
-      this.reporterService?.broadcastProgress(failedKey || 'pipeline', 'failed', error);
-      this.reporterService?.broadcastLog('Pipeline', `Error in ${failedKey || 'pipeline'}: ${error}`, 'error');
-      if (telegramSession) {
-        try {
-          await telegramSession.fail(error, failedKey);
-        } catch {}
-      }
+      await this.progress.dispatchPipelineFailure({
+        workId: pipelineWorkId,
+        error,
+        stepKey: failedKey,
+      });
+    };
+
+    const notifyComplete = async (payload: {
+      prUrl?: string;
+      issueUrl?: string;
+      branchName?: string;
+      testPassed?: boolean;
+      detail?: string;
+    }) => {
+      await this.progress.dispatchPipelineComplete({ workId: pipelineWorkId, ...payload });
     };
 
     try {
@@ -596,17 +637,8 @@ export class OrchestratorService {
       }
 
       // 3. Step 2: Implementation Work (opencode/agy with auto-fallback to claude)
-      const configImpl = (this.configLoader?.getConfig() as any)?.policies?.defaultImplementer;
-      const defaultImpl = configImpl && this.adapters.has(configImpl)
-        ? configImpl
-        : this.adapters.has('opencode')
-          ? 'opencode'
-          : this.adapters.has('agy')
-            ? 'agy'
-            : 'claude';
-      const chosenImplementer = options.implementer || defaultImpl;
       await notifyStepStart('implement', `در حال اجرا توسط ${chosenImplementer}`);
-      const implWorkId = crypto.randomUUID();
+      const implWorkId = pipelineWorkId;
       const implWork: Work = {
         id: implWorkId,
         title: `Implementation: ${title}`,
@@ -984,12 +1016,9 @@ ${testOutput.slice(-500)}
           });
 
           await notifyStepComplete('pr', prUrl);
-          if (telegramSession) {
-            await telegramSession.finish(prUrl);
-          }
         } catch (err: any) {
           this.logger.error(`[Pipeline] Error during Git/PR step: ${err.message}`);
-          await notifyFailure(err.message, 'pr');
+          await notifyStepFailure('pr', err.message);
           const errorCause = `Git/PR creation failed: ${err.message}`;
           implWork.status = WorkStatus.FAILED;
           implWork.context = {
@@ -1009,6 +1038,14 @@ ${testOutput.slice(-500)}
 
       const lineageTree = this.lineageService.formatAsciiTree(CanonicalUri.factoryWork(implWorkId));
 
+      await notifyComplete({
+        prUrl,
+        issueUrl,
+        branchName,
+        testPassed,
+        detail: prUrl || (testPassed ? 'Pipeline finished' : undefined),
+      });
+
       return {
         workId: implWorkId,
         issueNumber,
@@ -1024,6 +1061,10 @@ ${testOutput.slice(-500)}
     } catch (err: any) {
       await notifyFailure(err.message);
       throw err;
+    } finally {
+      if (telegramSink) {
+        this.progress.unregisterSink(telegramSink.id);
+      }
     }
   }
 

@@ -9,6 +9,7 @@ import {
   InitService,
   LineageService,
   OrchestratorService,
+  ProgressDispatcherService,
   ReporterService,
   StageRunnerService,
 } from './engine';
@@ -39,6 +40,7 @@ function initServices(projectPath?: string) {
   const store = new FactoryStoreService(dbService);
   const lineage = new LineageService(store);
   const reporter = new ReporterService(store, lineage);
+  const progressDispatcher = new ProgressDispatcherService(reporter);
   const stageRunner = new StageRunnerService(store, lineage, reporter);
   const agyAdapter = new AgyAdapter();
   const claudeAdapter = new ClaudeAdapter();
@@ -59,6 +61,7 @@ function initServices(projectPath?: string) {
     configLoader,
     stageRunner,
     opencodeAdapter,
+    progressDispatcher,
   );
   const doctor = new DoctorService(configLoader, dbService);
   const initService = new InitService(store, dbService);
@@ -69,6 +72,7 @@ function initServices(projectPath?: string) {
     store,
     lineage,
     reporter,
+    progressDispatcher,
     stageRunner,
     orchestrator,
     githubAdapter,
